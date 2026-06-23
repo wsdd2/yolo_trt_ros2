@@ -257,3 +257,256 @@ class_name, class_id, confidence, xmin, ymin, xmax, ymax
 - Python 代码兼容 ROS2 Foxy 常见的 Python 3.8 环境。
 - 默认 `mock` 模式不需要 TensorRT、Torch 或 Ultralytics。
 - 在 Jetson 上部署 TensorRT 时，需要保证 TensorRT Python bindings 与 JetPack/L4T 版本匹配。
+
+## 远程宿主机与 Docker 测试记录
+
+本节记录在 Unitree G1 Jetson Orin NX 远程宿主机和已有 Docker 容器中跑通 `mock` 检测管线的实际流程。
+
+远程宿主机：
+
+```text
+unitree@192.168.1.96
+```
+
+进入已有容器：
+
+```bash
+sudo docker exec -it wsdd_test /bin/bash
+```
+
+### 从本机传输工作区
+
+如果在 Windows PowerShell 中传输：
+
+```powershell
+scp -r E:\MscapeTech\Foxy_ROS unitree@192.168.1.96:~/tmp/
+```
+
+如果在 WSL 终端中传输，`E:\MscapeTech` 要写成 `/mnt/e/MscapeTech`：
+
+```bash
+scp -r /mnt/e/MscapeTech/Foxy_ROS unitree@192.168.1.96:~/tmp/
+```
+
+如果远程宿主机上只出现了 `~/tmp/src`，可以手动整理成 ROS2 workspace：
+
+```bash
+cd ~/tmp
+mkdir -p Foxy_ros
+mv src Foxy_ros/
+ls Foxy_ros/src
+```
+
+应看到：
+
+```text
+detector_msgs  yolo_trt_ros2
+```
+
+注意 `~/tmp/Foxy_ros` 的真实路径是 `/home/unitree/tmp/Foxy_ros`，不是 `/tmp/Foxy_ros`。拷贝进 Docker 时使用宿主机真实路径：
+
+```bash
+sudo docker exec wsdd_test mkdir -p /foxy_ros_custom
+sudo docker cp /home/unitree/tmp/Foxy_ros/. wsdd_test:/foxy_ros_custom/
+```
+
+### 容器内编译
+
+进入容器：
+
+```bash
+sudo docker exec -it wsdd_test /bin/bash
+```
+
+编译：
+
+```bash
+cd /foxy_ros_custom
+source /opt/ros/foxy/setup.bash
+colcon build --symlink-install
+source install/setup.bash
+```
+
+如果缺少 OpenCV、`cv_bridge` 或测试图像工具：
+
+```bash
+apt update
+apt install -y \
+  python3-opencv \
+  python3-numpy \
+  ros-foxy-cv-bridge \
+  ros-foxy-image-tools
+```
+
+### 避免 conda 环境污染
+
+ROS2 Foxy 通常使用系统 Python 3.8。Unitree 容器里可能存在 `unitree_sdk_py310` 或 `unitree_dds_py310` 这类 conda 环境，直接在 Python 3.10 conda 环境里运行 ROS2 Foxy 节点，可能导致 `cv2`、`rclpy`、`cv_bridge`、DDS 或动态库冲突。
+
+启动 ROS2 节点前建议退出 conda 并清理关键变量：
+
+```bash
+conda deactivate 2>/dev/null || true
+unset PYTHONPATH
+unset LD_LIBRARY_PATH
+source /opt/ros/foxy/setup.bash
+source /foxy_ros_custom/install/setup.bash
+```
+
+检查 Python 环境：
+
+```bash
+which python3
+python3 --version
+python3 -c "import cv2; import rclpy; import cv_bridge; print('ros python ok')"
+```
+
+理想情况下，`python3` 应来自 `/usr/bin/python3`。
+
+### DDS 与 ROS2 daemon 排查
+
+如果出现：
+
+```text
+bad_alloc caught: std::bad_alloc
+Failed to confirm that the daemon started successfully
+Killed
+```
+
+不一定是内存不足。先检查：
+
+```bash
+free -h
+```
+
+如果可用内存充足，优先怀疑 ROS2 daemon、RMW 或容器 DDS 环境。可以绕过 daemon，并固定 ROS domain 和 RMW：
+
+```bash
+export ROS_DOMAIN_ID=42
+export RMW_IMPLEMENTATION=rmw_fastrtps_cpp
+export ROS_DISABLE_DAEMON=1
+```
+
+部分 Foxy 版本的 `ros2 topic echo` 不支持 `--once`，直接使用：
+
+```bash
+ros2 topic echo /detector/objects
+```
+
+看到消息后按 `Ctrl+C` 停止。也可以用：
+
+```bash
+timeout 5 ros2 topic echo /detector/objects
+```
+
+如果 FastDDS 不稳定，可以尝试 CycloneDDS：
+
+```bash
+apt update
+apt install -y ros-foxy-rmw-cyclonedds-cpp
+export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
+```
+
+Docker 中 DDS 还可能受 `/dev/shm` 限制影响。如果后续新建测试容器，建议使用：
+
+```bash
+--net=host --ipc=host
+```
+
+或至少：
+
+```bash
+--net=host --shm-size=1g
+```
+
+### 无真实相机时的 mock 测试
+
+`image_tools cam2image` 默认会尝试打开 `/dev/video0`。如果容器没有挂载真实相机，会报：
+
+```text
+Could not open video stream
+```
+
+这不是检测节点问题。测试 `mock` 管线时可以用一个临时 Python 节点发布纯色图像：
+
+```bash
+cat > /tmp/pub_test_image.py <<'PY'
+import rclpy
+from rclpy.node import Node
+from sensor_msgs.msg import Image
+
+class PubImage(Node):
+    def __init__(self):
+        super().__init__('pub_test_image')
+        self.pub = self.create_publisher(Image, '/camera/color/image_raw', 10)
+        self.timer = self.create_timer(0.2, self.tick)
+
+    def tick(self):
+        w, h = 640, 480
+        msg = Image()
+        msg.header.stamp = self.get_clock().now().to_msg()
+        msg.header.frame_id = 'camera_color_optical_frame'
+        msg.height = h
+        msg.width = w
+        msg.encoding = 'bgr8'
+        msg.is_bigendian = 0
+        msg.step = w * 3
+        msg.data = bytes([40, 80, 160]) * (w * h)
+        self.pub.publish(msg)
+
+rclpy.init()
+node = PubImage()
+rclpy.spin(node)
+PY
+```
+
+推荐开三个容器终端测试。
+
+终端 1：启动检测节点：
+
+```bash
+cd /foxy_ros_custom
+source /opt/ros/foxy/setup.bash
+source install/setup.bash
+export ROS_DOMAIN_ID=42
+export RMW_IMPLEMENTATION=rmw_fastrtps_cpp
+export ROS_DISABLE_DAEMON=1
+ros2 launch yolo_trt_ros2 yolo_detector.launch.py
+```
+
+终端 2：发布测试图像：
+
+```bash
+source /opt/ros/foxy/setup.bash
+source /foxy_ros_custom/install/setup.bash
+export ROS_DOMAIN_ID=42
+export RMW_IMPLEMENTATION=rmw_fastrtps_cpp
+export ROS_DISABLE_DAEMON=1
+python3 /tmp/pub_test_image.py
+```
+
+终端 3：查看检测结果：
+
+```bash
+source /opt/ros/foxy/setup.bash
+source /foxy_ros_custom/install/setup.bash
+export ROS_DOMAIN_ID=42
+export RMW_IMPLEMENTATION=rmw_fastrtps_cpp
+export ROS_DISABLE_DAEMON=1
+ros2 topic echo /detector/objects
+```
+
+正常情况下会看到 `mock` 后端发布的假检测框：
+
+```text
+class_name: cabinet_door
+class_id: 0
+confidence: 0.9
+xmin: ...
+ymin: ...
+xmax: ...
+ymax: ...
+cx: ...
+cy: ...
+```
+
+如果后续接真实相机，需要在创建容器时挂载设备，例如 `--device=/dev/video0`，并先在宿主机确认 `/dev/video0` 存在。
