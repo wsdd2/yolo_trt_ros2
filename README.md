@@ -1,6 +1,6 @@
 # yolo_trt_ros2
 
-这是一个面向 ROS2 Foxy 的轻量级 YOLO 检测 ROS 包，目标是在 Unitree G1 的 NVIDIA Jetson Orin NX 上运行，用于电柜操作任务中的 2D 目标检测。
+这是一个面向 ROS2 Foxy 的轻量级 YOLO 检测 ROS 包，目标是在 Unitree G1 的 NVIDIA Jetson Orin NX 上运行，用于机器人任务中的 2D 目标检测。
 
 本包不依赖现成的 `yolo_ros`，也不强依赖 `ultralytics`、`torch` 或 amd64 环境。默认使用 `mock` 后端，用固定假检测框验证 ROS 图像订阅、检测结果发布和 debug image 发布流程。TensorRT 后端预留了接口，但不会在 `mock` 模式下导入 TensorRT。
 
