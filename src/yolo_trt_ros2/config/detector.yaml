@@ -1,0 +1,13 @@
+yolo_detector:
+  ros__parameters:
+    image_topic: /camera/color/image_raw
+    objects_topic: /detector/objects
+    debug_image_topic: /detector/debug_image
+    engine_path: ''
+    class_names_path: ''
+    input_width: 640
+    input_height: 640
+    conf_thres: 0.25
+    iou_thres: 0.45
+    publish_debug_image: true
+    backend: mock
