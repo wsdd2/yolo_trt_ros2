@@ -24,6 +24,8 @@ coordinate_projector:
     target_point_topic: /detector/target_point
     target_pose_topic: /detector/target_pose
     target_frame: ''
+    handeye_npy_path: ''
+    handeye_target_frame: base_link
     class_filter: ''
     min_confidence: 0.25
     depth_radius: 3

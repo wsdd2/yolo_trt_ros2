@@ -564,6 +564,21 @@ yolo_detector:
 
 默认 `target_frame: ''`，因此 `/detector/target_point` 和 `/detector/target_pose` 使用相机光学坐标系，也就是检测图像 header 里的 `frame_id`。
 
+如果已经有 `eye-to-hand` 手眼标定结果，例如 `T_cam2base.npy`，可以直接让节点加载 4x4 矩阵，把相机坐标转换成机器人基座/世界坐标：
+
+```yaml
+coordinate_projector:
+  ros__parameters:
+    handeye_npy_path: /foxy_ros_custom/outputs/eye_to_hand_xxx_npy/T_cam2base.npy
+    handeye_target_frame: base_link
+```
+
+`handeye_npy_path` 也可以指向包含 `T_cam2base.npy` 的目录。启用后：
+
+- `Object3D.point_camera`：原始相机坐标，单位 m。
+- `Object3D.point_target`：经过 `.npy` 矩阵转换后的 `base_link` / 世界坐标，单位 m。
+- `/detector/target_point` 和 `/detector/target_pose` 的 `header.frame_id` 会使用 `handeye_target_frame`。
+
 如果已经有手眼标定 TF，例如 `base_link <- camera_color_optical_frame`，可以设置：
 
 ```yaml
@@ -573,6 +588,8 @@ coordinate_projector:
 ```
 
 这样 `Object3D.point_camera` 保留相机系坐标，`Object3D.point_target` 和 `/detector/target_point` 输出 `base_link` 坐标。
+
+注意：如果你的标定文件是 `eye-in-hand` 的 `T_cam2hand.npy`，单独这个矩阵只能得到末端/手腕坐标；要得到世界/基座坐标，还需要实时 FK 或 TF 提供当前 `T_base_hand`。
 
 ### 快速检查
 

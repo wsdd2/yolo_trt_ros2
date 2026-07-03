@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import math
+import os
 
 import numpy as np
 import rclpy
@@ -33,6 +34,8 @@ class CoordinateProjectorNode(Node):
         self.target_point_topic = self.get_parameter('target_point_topic').value
         self.target_pose_topic = self.get_parameter('target_pose_topic').value
         self.target_frame = str(self.get_parameter('target_frame').value)
+        self.handeye_npy_path = str(self.get_parameter('handeye_npy_path').value)
+        self.handeye_target_frame = str(self.get_parameter('handeye_target_frame').value)
         self.min_confidence = float(self.get_parameter('min_confidence').value)
         self.depth_radius = int(self.get_parameter('depth_radius').value)
         self.depth_scale = float(self.get_parameter('depth_scale').value)
@@ -53,10 +56,11 @@ class CoordinateProjectorNode(Node):
         self.latest_depth_msg = None
         self.latest_depth = None
         self.latest_camera_info = None
+        self.handeye_transform = self._load_handeye_transform(self.handeye_npy_path)
 
         self.tf_buffer = None
         self.tf_listener = None
-        if self.target_frame:
+        if self.target_frame and self.handeye_transform is None:
             if tf2_ros is None:
                 self.get_logger().warn('tf2_ros is not available; target_frame transform disabled.')
             else:
@@ -72,8 +76,14 @@ class CoordinateProjectorNode(Node):
         self.create_subscription(Object2DArray, self.objects_topic, self._objects_callback, 10)
 
         self.get_logger().info(
-            'Coordinate projector started: objects=%s, depth=%s, camera_info=%s, target_frame=%s'
-            % (self.objects_topic, self.depth_topic, self.camera_info_topic, self.target_frame or '<camera>')
+            'Coordinate projector started: objects=%s, depth=%s, camera_info=%s, target_frame=%s, handeye=%s'
+            % (
+                self.objects_topic,
+                self.depth_topic,
+                self.camera_info_topic,
+                self._output_frame_name(),
+                self.handeye_npy_path or '<none>',
+            )
         )
 
     def _declare_parameters(self):
@@ -84,6 +94,8 @@ class CoordinateProjectorNode(Node):
         self.declare_parameter('target_point_topic', '/detector/target_point')
         self.declare_parameter('target_pose_topic', '/detector/target_pose')
         self.declare_parameter('target_frame', '')
+        self.declare_parameter('handeye_npy_path', '')
+        self.declare_parameter('handeye_target_frame', 'base_link')
         self.declare_parameter('class_filter', '')
         self.declare_parameter('min_confidence', 0.25)
         self.declare_parameter('depth_radius', 3)
@@ -116,6 +128,46 @@ class CoordinateProjectorNode(Node):
             self.get_logger().warn('%s must contain %d values; using default.' % (name, expected_len))
             return default
         return values
+
+    def _load_handeye_transform(self, path):
+        if not path:
+            return None
+
+        resolved = os.path.expanduser(path)
+        if os.path.isdir(resolved):
+            candidates = [
+                'T_cam2base.npy',
+                'T_cam2world.npy',
+                'T_camera2base.npy',
+                'T_camera2world.npy',
+            ]
+            for name in candidates:
+                candidate = os.path.join(resolved, name)
+                if os.path.isfile(candidate):
+                    resolved = candidate
+                    break
+
+        if not os.path.isfile(resolved):
+            self.get_logger().warn('handeye_npy_path does not exist or has no supported transform: %s' % path)
+            return None
+
+        try:
+            transform = np.load(resolved).astype(np.float64)
+        except Exception as exc:
+            self.get_logger().warn('Failed to load hand-eye npy: %s' % exc)
+            return None
+
+        if transform.shape != (4, 4):
+            self.get_logger().warn('hand-eye transform must be 4x4, got shape=%s' % (transform.shape,))
+            return None
+
+        self.get_logger().info('Loaded hand-eye camera-to-target transform: %s' % resolved)
+        return transform
+
+    def _output_frame_name(self):
+        if self.handeye_transform is not None:
+            return self.handeye_target_frame or self.target_frame or 'base_link'
+        return self.target_frame or '<camera>'
 
     def _depth_callback(self, depth_msg):
         try:
@@ -190,7 +242,11 @@ class CoordinateProjectorNode(Node):
         target_frame = header.frame_id
         message = 'camera_frame'
 
-        if self.target_frame:
+        if self.handeye_transform is not None:
+            point_target = self._apply_transform(self.handeye_transform, point_camera)
+            target_frame = self.handeye_target_frame or self.target_frame or 'base_link'
+            message = 'handeye_npy'
+        elif self.target_frame:
             transformed = self._transform_point(point_camera, header.frame_id, self.target_frame)
             if transformed is None:
                 return self._invalid_object(obj, header, 'TF transform unavailable')
@@ -218,7 +274,10 @@ class CoordinateProjectorNode(Node):
         msg.valid = False
         msg.cached = False
         msg.source_frame = header.frame_id
-        msg.target_frame = self.target_frame or header.frame_id
+        if self.handeye_transform is not None:
+            msg.target_frame = self._output_frame_name()
+        else:
+            msg.target_frame = self.target_frame or header.frame_id
         msg.depth_m = 0.0
         msg.point_camera = Point()
         msg.point_target = Point()
@@ -298,6 +357,11 @@ class CoordinateProjectorNode(Node):
         q = transform.transform.rotation
         rotated = self._rotate_vector(point, [q.x, q.y, q.z, q.w])
         return rotated + np.array([t.x, t.y, t.z], dtype=np.float64)
+
+    def _apply_transform(self, transform, point):
+        point_h = np.ones(4, dtype=np.float64)
+        point_h[:3] = np.asarray(point, dtype=np.float64).reshape(3)
+        return (transform @ point_h)[:3]
 
     def _rotate_vector(self, vector, quat_xyzw):
         x, y, z, w = [float(v) for v in quat_xyzw]

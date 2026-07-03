@@ -18,3 +18,8 @@ yolo_detector:
     best_handle_only: false
     prompts: 'lever door handle,horizontal door handle,door lever handle,pull door handle'
     backend: mock
+
+coordinate_projector:
+  ros__parameters:
+    handeye_npy_path: ''
+    handeye_target_frame: base_link
