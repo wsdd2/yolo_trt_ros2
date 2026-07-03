@@ -1,6 +1,6 @@
 # Unitree H2 部署与基准测试指令集
 
-这份指令面向 H2 PC2 / Jetson / Docker 上部署 `Foxy_ROS` 电柜巡检感知链路：
+这份指令面向 Unitree H2 PC2 宿主机直接部署 `Foxy_ROS` 电柜巡检感知链路，不使用 Docker：
 
 ```text
 RGB/Depth/CameraInfo
@@ -25,8 +25,8 @@ H2 侧已有约定：
 ```text
 H2_HOST=unitree@<H2-PC2-IP>
 H2_WS=/home/unitree/MscapeTech
-CONTAINER=wsdd_test
-ROS_WS=/foxy_ros_custom
+FOXY_WS=/home/unitree/MscapeTech/Foxy_ROS
+MODEL_DIR=/home/unitree/MscapeTech/models
 ROS_DOMAIN_ID=42
 RMW_IMPLEMENTATION=rmw_fastrtps_cpp
 ```
@@ -64,24 +64,11 @@ mkdir -p ~/MscapeTech/models
 mv ~/tmp/yoloe-11s-seg.pt ~/MscapeTech/models/
 ```
 
-如果使用 Docker，把工作区拷进容器：
+后续所有命令都在 H2 宿主机上执行。
 
-```bash
-sudo docker exec ${CONTAINER} mkdir -p ${ROS_WS}
-sudo docker cp ~/MscapeTech/Foxy_ROS/. ${CONTAINER}:${ROS_WS}/
-sudo docker exec ${CONTAINER} mkdir -p ${ROS_WS}/models
-sudo docker cp ~/MscapeTech/models/yoloe-11s-seg.pt ${CONTAINER}:${ROS_WS}/models/
-```
+## 2. H2 宿主机环境检查
 
-## 2. 容器内环境检查
-
-进入容器：
-
-```bash
-sudo docker exec -it ${CONTAINER} /bin/bash
-```
-
-避免 conda 污染 Foxy：
+ROS2 Foxy 通常使用系统 Python 3.8。H2 上如果有 conda 环境，启动 ROS2 节点前建议退出 conda 并清理关键变量：
 
 ```bash
 conda deactivate 2>/dev/null || true
@@ -96,8 +83,8 @@ export RMW_IMPLEMENTATION=rmw_fastrtps_cpp
 安装基础依赖：
 
 ```bash
-apt update
-apt install -y \
+sudo apt update
+sudo apt install -y \
   python3-opencv \
   python3-numpy \
   python3-colcon-common-extensions \
@@ -126,7 +113,7 @@ python3 -c "import ultralytics; print('ultralytics ok')"
 ## 3. 编译 Foxy_ROS
 
 ```bash
-cd /foxy_ros_custom
+cd ~/MscapeTech/Foxy_ROS
 source /opt/ros/foxy/setup.bash
 colcon build --symlink-install
 source install/setup.bash
@@ -144,7 +131,7 @@ ros2 interface show detector_msgs/msg/Object3D
 编辑：
 
 ```bash
-vi /foxy_ros_custom/src/yolo_trt_ros2/config/inspection_perception.yaml
+vi ~/MscapeTech/Foxy_ROS/src/yolo_trt_ros2/config/inspection_perception.yaml
 ```
 
 推荐先用 mock：
@@ -162,7 +149,7 @@ yolo_detector:
 yolo_detector:
   ros__parameters:
     backend: yoloe
-    model_path: /foxy_ros_custom/models/yoloe-11s-seg.pt
+    model_path: /home/unitree/MscapeTech/models/yoloe-11s-seg.pt
     prompts: 'red button,green button,black knob,selector switch,rotary switch,toggle switch,control panel switch,cabinet door handle,indicator light,pilot light'
     conf_thres: 0.08
     iou_thres: 0.45
@@ -174,7 +161,7 @@ yolo_detector:
 ```yaml
 coordinate_projector:
   ros__parameters:
-    handeye_npy_path: /foxy_ros_custom/outputs/eye_to_hand_xxx_npy/T_cam2base.npy
+    handeye_npy_path: /home/unitree/MscapeTech/Hand_Eye_Calib/outputs/eye_to_hand_xxx_npy/T_cam2base.npy
     handeye_target_frame: pelvis
 ```
 
@@ -209,14 +196,14 @@ ros2 topic echo /camera/color/camera_info
 ros2 run image_tools cam2image --ros-args -r image:=/camera/color/image_raw
 ```
 
-如果 `cam2image` 试图打开 `/dev/video0` 且失败，说明容器没有挂载相机设备；这不影响后面的纯 ROS mock 测试，可用 README 中的 `/tmp/pub_test_image.py`。
+如果 `cam2image` 试图打开 `/dev/video0` 且失败，说明 H2 宿主机没有可用的 V4L2 相机设备；这不影响后面的纯 ROS mock 测试，可用 README 中的 `/tmp/pub_test_image.py`。
 
 ## 6. 启动感知链路
 
 终端 A：
 
 ```bash
-cd /foxy_ros_custom
+cd ~/MscapeTech/Foxy_ROS
 source /opt/ros/foxy/setup.bash
 source install/setup.bash
 export ROS_DOMAIN_ID=42
@@ -229,7 +216,7 @@ ros2 launch yolo_trt_ros2 inspection_perception.launch.py
 
 ```bash
 source /opt/ros/foxy/setup.bash
-source /foxy_ros_custom/install/setup.bash
+source ~/MscapeTech/Foxy_ROS/install/setup.bash
 export ROS_DOMAIN_ID=42
 export ROS_DISABLE_DAEMON=1
 export RMW_IMPLEMENTATION=rmw_fastrtps_cpp
@@ -256,7 +243,7 @@ rqt_image_view /detector/debug_image
 
 ```bash
 source /opt/ros/foxy/setup.bash
-source /foxy_ros_custom/install/setup.bash
+source ~/MscapeTech/Foxy_ROS/install/setup.bash
 export ROS_DOMAIN_ID=42
 export ROS_DISABLE_DAEMON=1
 export RMW_IMPLEMENTATION=rmw_fastrtps_cpp
@@ -440,7 +427,7 @@ backend: mock
 
 ```bash
 python3 -c "from ultralytics import YOLOE; print('YOLOE ok')"
-ls -lh /foxy_ros_custom/models/yoloe-11s-seg.pt
+ls -lh /home/unitree/MscapeTech/models/yoloe-11s-seg.pt
 ```
 
 ### 手眼文件加载失败
