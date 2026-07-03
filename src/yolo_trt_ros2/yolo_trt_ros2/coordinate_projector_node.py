@@ -45,18 +45,19 @@ G1_H2_JOINT_INDEX = {
 
 
 class UnitreeLowStateJointReader:
-    """Tiny Unitree rt/lowstate reader used only when eye-in-hand FK is enabled."""
+    """Tiny Unitree lowstate reader used only when eye-in-hand FK is enabled."""
 
-    def __init__(self, network_interface='', domain_id=0):
+    def __init__(self, network_interface='', domain_id=0, lowstate_topic='rt/lowstate'):
         from unitree_sdk2py.core.channel import ChannelFactoryInitialize, ChannelSubscriber
         from unitree_sdk2py.idl.unitree_hg.msg.dds_ import LowState_
 
         self._latest = None
+        self.topic = lowstate_topic or 'rt/lowstate'
         if network_interface:
             ChannelFactoryInitialize(int(domain_id), str(network_interface))
         else:
             ChannelFactoryInitialize(int(domain_id))
-        self._subscriber = ChannelSubscriber('rt/lowstate', LowState_)
+        self._subscriber = ChannelSubscriber(self.topic, LowState_)
         self._subscriber.Init(self._on_lowstate, 10)
 
     def _on_lowstate(self, msg):
@@ -103,6 +104,7 @@ class CoordinateProjectorNode(Node):
         self.camera_link = str(self.get_parameter('camera_link').value)
         self.network_interface = str(self.get_parameter('network_interface').value)
         self.domain_id = int(self.get_parameter('domain_id').value)
+        self.lowstate_topic = str(self.get_parameter('lowstate_topic').value)
         self.joint_json_path = str(self.get_parameter('joint_json_path').value)
         self.lock_waist = bool(self.get_parameter('lock_waist').value)
         self.h2_ee_offset_xyz = self._get_float_list_parameter('h2_ee_offset_xyz', [0.05, 0.0, 0.0], 3)
@@ -199,6 +201,7 @@ class CoordinateProjectorNode(Node):
         self.declare_parameter('camera_link', '')
         self.declare_parameter('network_interface', '')
         self.declare_parameter('domain_id', 0)
+        self.declare_parameter('lowstate_topic', 'rt/lowstate')
         self.declare_parameter('joint_json_path', '')
         self.declare_parameter('lock_waist', True)
         self.declare_parameter('h2_ee_offset_xyz', [0.05, 0.0, 0.0])
@@ -339,9 +342,16 @@ class CoordinateProjectorNode(Node):
             return
 
         try:
-            self._joint_reader = UnitreeLowStateJointReader(self.network_interface, self.domain_id)
+            self._joint_reader = UnitreeLowStateJointReader(
+                self.network_interface,
+                self.domain_id,
+                self.lowstate_topic,
+            )
             if not self._joint_reader.wait(timeout_sec=2.0):
-                self.get_logger().warn('No rt/lowstate received yet; point_target will stay camera-only until joints arrive.')
+                self.get_logger().warn(
+                    'No %s received yet; point_target will stay camera-only until joints arrive.'
+                    % self.lowstate_topic
+                )
         except Exception as exc:
             self._fk_error = 'Failed to initialize Unitree lowstate reader: %s' % exc
             self.get_logger().warn(self._fk_error)

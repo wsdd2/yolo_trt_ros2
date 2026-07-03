@@ -1,3 +1,6 @@
+import os
+
+
 class UltralyticsBackend(object):
     """Ultralytics YOLO/YOLOE backend with lazy imports for ROS2 Foxy."""
 
@@ -16,6 +19,7 @@ class UltralyticsBackend(object):
         device='',
         prompt_free=False,
         best_handle_only=False,
+        mobileclip_path='',
     ):
         if not model_path:
             raise ValueError('model_path is required when backend=ultralytics/yolo/yoloe')
@@ -38,8 +42,10 @@ class UltralyticsBackend(object):
         self.device = device
         self.prompt_free = bool(prompt_free)
         self.best_handle_only = bool(best_handle_only)
+        self.mobileclip_path = str(mobileclip_path or '')
 
         if self.model_kind == 'yoloe':
+            self._patch_mobileclip_asset()
             self.model = YOLOE(model_path)
             if not self.prompt_free and self.prompts:
                 self.model.set_classes(self.prompts)
@@ -51,6 +57,31 @@ class UltralyticsBackend(object):
         if kind in ('yolo', 'yoloe'):
             return kind
         return 'yoloe' if 'yoloe' in str(model_path).lower() else 'yolo'
+
+    def _patch_mobileclip_asset(self):
+        if not self.mobileclip_path:
+            return
+
+        resolved = os.path.expanduser(self.mobileclip_path)
+        if not os.path.isfile(resolved):
+            raise FileNotFoundError('mobileclip_path does not exist: %s' % resolved)
+
+        try:
+            from ultralytics.nn import text_model
+        except Exception:
+            return
+
+        original = getattr(text_model, 'attempt_download_asset', None)
+        if original is None:
+            from ultralytics.utils.downloads import attempt_download_asset as original
+
+        def _attempt_download_asset(asset, *args, **kwargs):
+            name = str(asset).lower()
+            if 'mobileclip' in name or 'blt' in name:
+                return resolved
+            return original(asset, *args, **kwargs)
+
+        text_model.attempt_download_asset = _attempt_download_asset
 
     def infer(self, bgr_image):
         if bgr_image is None or bgr_image.size == 0:

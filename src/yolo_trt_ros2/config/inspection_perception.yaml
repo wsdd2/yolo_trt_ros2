@@ -5,10 +5,15 @@ yolo_detector:
     debug_image_topic: /detector/debug_image
     backend: yoloe
     model_path: /home/unitree/MscapeTech/models/yoloe-11s-seg.pt
+    mobileclip_path: /home/unitree/MscapeTech/models/mobileclip_blt.ts
     model_kind: yoloe
-    prompts: 'red button,green button,black knob,selector switch,rotary switch,toggle switch,control panel switch,cabinet door handle,indicator light,pilot light'
+    prompts: 'black cabinet door handle,recessed black door handle,vertical cabinet handle,cabinet door handle,blue circular push point,blue push button,blue marker point'
     prompt_free: false
     best_handle_only: false
+    detect_blue_point: true
+    blue_point_class_name: blue push point
+    blue_point_min_area: 40.0
+    blue_point_max_area_ratio: 0.02
     conf_thres: 0.08
     iou_thres: 0.45
     imgsz: 640
@@ -36,6 +41,7 @@ coordinate_projector:
     camera_link: ''
     network_interface: eth0
     domain_id: 0
+    lowstate_topic: rt/lowstate
     joint_json_path: ''
     lock_waist: true
     h2_ee_offset_xyz: [0.05, 0.0, 0.0]

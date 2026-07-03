@@ -169,6 +169,7 @@ yolo_detector:
   ros__parameters:
     backend: yoloe
     model_path: /home/unitree/MscapeTech/models/yoloe-11s-seg.pt
+    mobileclip_path: /home/unitree/MscapeTech/models/mobileclip_blt.ts
     prompts: 'red button,green button,black knob,selector switch,rotary switch,toggle switch,control panel switch,cabinet door handle,indicator light,pilot light'
     conf_thres: 0.08
     iou_thres: 0.45
@@ -197,6 +198,7 @@ coordinate_projector:
     hand_link: right_wrist_yaw_link
     network_interface: eth0
     domain_id: 0
+    lowstate_topic: rt/lowstate
     lock_waist: true
     h2_ee_offset_xyz: [0.05, 0.0, 0.0]
     publish_target_joint_state: true
@@ -241,7 +243,7 @@ export PYTHONPATH=/home/unitree/MscapeTech/unitree_sdk2_python:$PYTHONPATH
 python3 -c "from unitree_sdk2py.core.channel import ChannelFactoryInitialize; print('unitree_sdk2py ok')"
 ```
 
-只有这个检查通过后，`eye-in-hand` 的实时 FK/IK 才能从 `rt/lowstate` 读取关节并输出 `point_target` 和 `target_joint_state`。
+只有这个检查通过后，`eye-in-hand` 的实时 FK/IK 才能从 `lowstate_topic` 读取关节并输出 `point_target` 和 `target_joint_state`。如果 `rt/lowstate` 收不到，可以尝试 `rt/lf/lowstate`。
 
 ## 5. 启动真实相机
 
@@ -552,6 +554,20 @@ backend: mock
 python3 -c "from ultralytics import YOLOE; print('YOLOE ok')"
 ls -lh /home/unitree/MscapeTech/models/yoloe-11s-seg.pt
 ```
+
+如果 prompt 模式报 MobileCLIP/BLT 权重损坏或下载失败，先把本地 `mobileclip_blt.ts` 上传到：
+
+```text
+/home/unitree/MscapeTech/models/mobileclip_blt.ts
+```
+
+配置中指定：
+
+```yaml
+mobileclip_path: /home/unitree/MscapeTech/models/mobileclip_blt.ts
+```
+
+然后重新 `colcon build --symlink-install`。该参数会让 YOLOE 文本 prompt 编码阶段直接读取指定文件，绕过 Ultralytics 自动下载的损坏缓存。
 
 ### cv2 / cv_bridge 报 NumPy 2.x 不兼容
 

@@ -35,6 +35,11 @@ class YoloDetectorNode(Node):
         self.device = str(self.get_parameter('device').value)
         self.prompt_free = bool(self.get_parameter('prompt_free').value)
         self.best_handle_only = bool(self.get_parameter('best_handle_only').value)
+        self.mobileclip_path = str(self.get_parameter('mobileclip_path').value)
+        self.detect_blue_point = bool(self.get_parameter('detect_blue_point').value)
+        self.blue_point_class_name = str(self.get_parameter('blue_point_class_name').value)
+        self.blue_point_min_area = float(self.get_parameter('blue_point_min_area').value)
+        self.blue_point_max_area_ratio = float(self.get_parameter('blue_point_max_area_ratio').value)
         self.prompts = self._parse_prompts(self.get_parameter('prompts').value)
 
         self.bridge = CvBridge()
@@ -73,6 +78,11 @@ class YoloDetectorNode(Node):
         self.declare_parameter('device', '')
         self.declare_parameter('prompt_free', False)
         self.declare_parameter('best_handle_only', False)
+        self.declare_parameter('mobileclip_path', '')
+        self.declare_parameter('detect_blue_point', False)
+        self.declare_parameter('blue_point_class_name', 'blue push point')
+        self.declare_parameter('blue_point_min_area', 40.0)
+        self.declare_parameter('blue_point_max_area_ratio', 0.02)
         self.declare_parameter(
             'prompts',
             'lever door handle,horizontal door handle,door lever handle,pull door handle',
@@ -134,6 +144,7 @@ class YoloDetectorNode(Node):
                 device=self.device,
                 prompt_free=self.prompt_free,
                 best_handle_only=self.best_handle_only,
+                mobileclip_path=self.mobileclip_path,
             )
 
         raise ValueError('Unsupported backend: %s. Use mock, yoloe, yolo, ultralytics or tensorrt.' % self.backend_name)
@@ -150,6 +161,8 @@ class YoloDetectorNode(Node):
         except Exception as exc:
             self.get_logger().error('Backend inference failed: %s' % exc)
             return
+        if self.detect_blue_point:
+            detections = list(detections) + self._detect_blue_point(bgr_image, detections)
 
         objects_msg = self._build_objects_msg(image_msg.header, detections)
         self.objects_pub.publish(objects_msg)
@@ -190,8 +203,10 @@ class YoloDetectorNode(Node):
             cx = int(round(float(det.get('cx', float(xmin + xmax) * 0.5))))
             cy = int(round(float(det.get('cy', float(ymin + ymax) * 0.5))))
 
-            cv2.rectangle(image, (xmin, ymin), (xmax, ymax), (0, 255, 0), 2)
-            cv2.circle(image, (cx, cy), 5, (0, 0, 255), -1)
+            color = (255, 128, 0) if 'blue' in class_name.lower() else (0, 255, 0)
+            center_color = (255, 0, 0) if 'blue' in class_name.lower() else (0, 0, 255)
+            cv2.rectangle(image, (xmin, ymin), (xmax, ymax), color, 2)
+            cv2.circle(image, (cx, cy), 5, center_color, -1)
             label = '%s %.2f' % (class_name, confidence)
             cv2.putText(
                 image,
@@ -199,11 +214,94 @@ class YoloDetectorNode(Node):
                 (xmin, max(0, ymin - 8)),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 0.6,
-                (0, 255, 0),
+                color,
                 2,
                 cv2.LINE_AA,
             )
         return image
+
+    def _detect_blue_point(self, image, detections):
+        if image is None or image.size == 0:
+            return []
+
+        img_h, img_w = image.shape[:2]
+        rois = self._blue_search_rois(detections, img_w, img_h)
+        candidates = []
+        for rx1, ry1, rx2, ry2 in rois:
+            if rx2 <= rx1 or ry2 <= ry1:
+                continue
+            crop = image[ry1:ry2, rx1:rx2]
+            hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
+            mask = cv2.inRange(hsv, (78, 45, 35), (112, 255, 255))
+            kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+            mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+            mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+            contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            for contour in contours:
+                area = float(cv2.contourArea(contour))
+                if area < self.blue_point_min_area:
+                    continue
+                if area > float(img_w * img_h) * max(self.blue_point_max_area_ratio, 1e-6):
+                    continue
+                x, y, w, h = cv2.boundingRect(contour)
+                if w <= 2 or h <= 2:
+                    continue
+                aspect = float(w) / float(h)
+                if aspect < 0.45 or aspect > 2.2:
+                    continue
+                perimeter = float(cv2.arcLength(contour, True))
+                circularity = 0.0 if perimeter <= 0.0 else 4.0 * 3.14159 * area / (perimeter * perimeter)
+                if circularity < 0.25:
+                    continue
+                moments = cv2.moments(contour)
+                if moments['m00'] != 0.0:
+                    cx = rx1 + float(moments['m10'] / moments['m00'])
+                    cy = ry1 + float(moments['m01'] / moments['m00'])
+                else:
+                    cx = rx1 + float(x + w) * 0.5
+                    cy = ry1 + float(y + h) * 0.5
+                candidates.append(
+                    {
+                        'class_name': self.blue_point_class_name,
+                        'class_id': 9001,
+                        'confidence': min(0.99, 0.45 + 0.45 * min(1.0, circularity)),
+                        'xmin': int(rx1 + x),
+                        'ymin': int(ry1 + y),
+                        'xmax': int(rx1 + x + w),
+                        'ymax': int(ry1 + y + h),
+                        'cx': float(cx),
+                        'cy': float(cy),
+                        'score': area * max(0.2, circularity),
+                    }
+                )
+
+        if not candidates:
+            return []
+        best = max(candidates, key=lambda det: det['score'])
+        best.pop('score', None)
+        return [best]
+
+    def _blue_search_rois(self, detections, img_w, img_h):
+        handle_rois = []
+        for det in detections:
+            name = str(det.get('class_name', '')).lower()
+            if not any(token in name for token in ('handle', 'lever', 'pull', 'cabinet door')):
+                continue
+            x1 = int(det.get('xmin', 0))
+            y1 = int(det.get('ymin', 0))
+            x2 = int(det.get('xmax', img_w - 1))
+            y2 = int(det.get('ymax', img_h - 1))
+            pad_x = max(8, int((x2 - x1) * 0.35))
+            pad_y = max(8, int((y2 - y1) * 0.25))
+            handle_rois.append(
+                (
+                    max(0, x1 - pad_x),
+                    max(0, y1 - pad_y),
+                    min(img_w, x2 + pad_x),
+                    min(img_h, y2 + pad_y),
+                )
+            )
+        return handle_rois or [(0, 0, img_w, img_h)]
 
 
 def main(args=None):
