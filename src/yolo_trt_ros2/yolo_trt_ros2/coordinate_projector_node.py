@@ -12,7 +12,7 @@ from geometry_msgs.msg import Point, PointStamped, PoseStamped
 from rclpy.duration import Duration
 from rclpy.node import Node
 from rclpy.time import Time
-from sensor_msgs.msg import CameraInfo, Image
+from sensor_msgs.msg import CameraInfo, Image, JointState
 
 try:
     import tf2_ros
@@ -90,6 +90,7 @@ class CoordinateProjectorNode(Node):
         self.objects_3d_topic = self.get_parameter('objects_3d_topic').value
         self.target_point_topic = self.get_parameter('target_point_topic').value
         self.target_pose_topic = self.get_parameter('target_pose_topic').value
+        self.target_joint_state_topic = self.get_parameter('target_joint_state_topic').value
         self.target_frame = str(self.get_parameter('target_frame').value)
         self.handeye_npy_path = str(self.get_parameter('handeye_npy_path').value)
         self.handeye_mode = str(self.get_parameter('handeye_mode').value).strip().lower().replace('_', '-')
@@ -112,6 +113,8 @@ class CoordinateProjectorNode(Node):
         self.max_depth_m = float(self.get_parameter('max_depth_m').value)
         self.publish_invalid = bool(self.get_parameter('publish_invalid').value)
         self.publish_target_pose = bool(self.get_parameter('publish_target_pose').value)
+        self.publish_target_joint_state = bool(self.get_parameter('publish_target_joint_state').value)
+        self.publish_failed_ik_solution = bool(self.get_parameter('publish_failed_ik_solution').value)
         self.stale_depth_sec = float(self.get_parameter('stale_depth_sec').value)
         self.transform_timeout_sec = float(self.get_parameter('transform_timeout_sec').value)
         self.class_filter = set(self._get_string_list_parameter('class_filter'))
@@ -120,6 +123,17 @@ class CoordinateProjectorNode(Node):
             [0.0, 0.0, 0.0, 1.0],
             4,
         )
+        self.ik_target_link = str(self.get_parameter('ik_target_link').value)
+        self.ik_active_joints = self._get_string_list_parameter('ik_active_joints')
+        self.ik_end_effector_offset_xyz = self._get_float_list_parameter('ik_end_effector_offset_xyz', [0.0, 0.0, 0.0], 3)
+        self.ik_target_position_offset_xyz = self._get_float_list_parameter('ik_target_position_offset_xyz', [0.0, 0.0, 0.0], 3)
+        self.ik_max_iterations = int(self.get_parameter('ik_max_iterations').value)
+        self.ik_tolerance_position = float(self.get_parameter('ik_tolerance_position').value)
+        self.ik_tolerance_orientation = float(self.get_parameter('ik_tolerance_orientation').value)
+        self.ik_damping = float(self.get_parameter('ik_damping').value)
+        self.ik_step_scale = float(self.get_parameter('ik_step_scale').value)
+        self.ik_position_weight = float(self.get_parameter('ik_position_weight').value)
+        self.ik_orientation_weight = float(self.get_parameter('ik_orientation_weight').value)
 
         self.bridge = CvBridge()
         self.latest_depth_msg = None
@@ -128,8 +142,11 @@ class CoordinateProjectorNode(Node):
         self.handeye_transform = None
         self.T_cam2hand = None
         self._fk_model = None
+        self._ik_solver = None
         self._joint_reader = None
         self._fk_error = ''
+        self._ik_error = ''
+        self._last_ik_warning_sec = 0.0
         self._configure_handeye_and_fk()
 
         self.tf_buffer = None
@@ -144,6 +161,7 @@ class CoordinateProjectorNode(Node):
         self.objects_3d_pub = self.create_publisher(Object3DArray, self.objects_3d_topic, 10)
         self.target_point_pub = self.create_publisher(PointStamped, self.target_point_topic, 10)
         self.target_pose_pub = self.create_publisher(PoseStamped, self.target_pose_topic, 10)
+        self.target_joint_state_pub = self.create_publisher(JointState, self.target_joint_state_topic, 10)
 
         self.create_subscription(Image, self.depth_topic, self._depth_callback, 10)
         self.create_subscription(CameraInfo, self.camera_info_topic, self._camera_info_callback, 10)
@@ -168,6 +186,7 @@ class CoordinateProjectorNode(Node):
         self.declare_parameter('objects_3d_topic', '/detector/objects_3d')
         self.declare_parameter('target_point_topic', '/detector/target_point')
         self.declare_parameter('target_pose_topic', '/detector/target_pose')
+        self.declare_parameter('target_joint_state_topic', '/detector/target_joint_state')
         self.declare_parameter('target_frame', '')
         self.declare_parameter('handeye_npy_path', '')
         self.declare_parameter('handeye_mode', 'eye-to-hand')
@@ -191,7 +210,20 @@ class CoordinateProjectorNode(Node):
         self.declare_parameter('max_depth_m', 5.0)
         self.declare_parameter('publish_invalid', False)
         self.declare_parameter('publish_target_pose', True)
+        self.declare_parameter('publish_target_joint_state', False)
+        self.declare_parameter('publish_failed_ik_solution', False)
         self.declare_parameter('target_pose_orientation_xyzw', [0.0, 0.0, 0.0, 1.0])
+        self.declare_parameter('ik_target_link', '')
+        self.declare_parameter('ik_active_joints', '')
+        self.declare_parameter('ik_end_effector_offset_xyz', [0.0, 0.0, 0.0])
+        self.declare_parameter('ik_target_position_offset_xyz', [0.0, 0.0, 0.0])
+        self.declare_parameter('ik_max_iterations', 120)
+        self.declare_parameter('ik_tolerance_position', 0.005)
+        self.declare_parameter('ik_tolerance_orientation', 3.2)
+        self.declare_parameter('ik_damping', 0.001)
+        self.declare_parameter('ik_step_scale', 0.4)
+        self.declare_parameter('ik_position_weight', 1.0)
+        self.declare_parameter('ik_orientation_weight', 0.0)
         self.declare_parameter('stale_depth_sec', 0.5)
         self.declare_parameter('transform_timeout_sec', 0.05)
 
@@ -227,6 +259,8 @@ class CoordinateProjectorNode(Node):
             return
 
         self.handeye_transform = self._load_handeye_transform(self.handeye_npy_path)
+        if self.handeye_transform is not None and self.publish_target_joint_state:
+            self._configure_fk()
 
     def _workspace_path(self, *parts):
         return Path(os.path.expanduser(self.workspace_root)).joinpath(*parts)
@@ -261,7 +295,8 @@ class CoordinateProjectorNode(Node):
             workspace = Path(os.path.expanduser(self.workspace_root))
             robot_kinematics_dir = workspace / 'robot_kinematics'
             joint_to_pose_dir = robot_kinematics_dir / 'joint_to_pose'
-            for path in (robot_kinematics_dir, joint_to_pose_dir):
+            pose_to_joint_dir = robot_kinematics_dir / 'pose_to_joint'
+            for path in (robot_kinematics_dir, joint_to_pose_dir, pose_to_joint_dir):
                 text = str(path)
                 if text not in sys.path:
                     sys.path.insert(0, text)
@@ -279,6 +314,26 @@ class CoordinateProjectorNode(Node):
             self._fk_error = 'Failed to initialize FK: %s' % exc
             self.get_logger().warn(self._fk_error)
             return
+
+        if self.publish_target_joint_state:
+            try:
+                from ik_urdf import URDFIK
+
+                self._ik_solver = URDFIK(str(urdf))
+                if not self.ik_target_link:
+                    self.ik_target_link = self.hand_link
+                self.get_logger().info(
+                    'IK target joint publisher enabled: topic=%s, base=%s, target_link=%s, active_joints=%s'
+                    % (
+                        self.target_joint_state_topic,
+                        self.base_link,
+                        self.ik_target_link,
+                        ','.join(self.ik_active_joints) if self.ik_active_joints else '<chain-default>',
+                    )
+                )
+            except Exception as exc:
+                self._ik_error = 'Failed to initialize IK: %s' % exc
+                self.get_logger().warn(self._ik_error)
 
         if self.joint_json_path:
             return
@@ -660,6 +715,90 @@ class CoordinateProjectorNode(Node):
             pose_msg.pose.orientation.w = qw
             self.target_pose_pub.publish(pose_msg)
 
+        self._publish_target_joint_state(object_3d, header)
+
+    def _publish_target_joint_state(self, object_3d, header):
+        if not self.publish_target_joint_state:
+            return
+        if self._ik_solver is None:
+            self._warn_ik('IK solver is unavailable: %s' % (self._ik_error or 'not initialized'))
+            return
+
+        joints = self._current_joint_values()
+        if not joints:
+            self._warn_ik('IK skipped: missing current joint values')
+            return
+
+        try:
+            target_pose = self._ik_target_pose_matrix(object_3d.point_target)
+            solution = self._ik_solver.solve(
+                target_link=self.ik_target_link or self.hand_link or self._default_hand_link(),
+                target_pose=target_pose,
+                initial_joint_values=self._lock_joint_values(joints),
+                active_joints=self.ik_active_joints or None,
+                base_link=self.base_link or self._default_base_link(),
+                base_pose=np.eye(4, dtype=np.float64).tolist(),
+                max_iterations=self.ik_max_iterations,
+                tolerance_position=self.ik_tolerance_position,
+                tolerance_orientation=self.ik_tolerance_orientation,
+                damping=self.ik_damping,
+                step_scale=self.ik_step_scale,
+                position_weight=self.ik_position_weight,
+                orientation_weight=self.ik_orientation_weight,
+                clamp_to_limits=True,
+            )
+        except Exception as exc:
+            self._warn_ik('IK failed: %s' % exc)
+            return
+
+        if not solution.success:
+            self._warn_ik(
+                'IK did not converge: %s, pos_err=%.4f, rot_err=%.4f'
+                % (solution.message, solution.final_position_error_norm, solution.final_orientation_error_norm)
+            )
+            if not self.publish_failed_ik_solution:
+                return
+
+        joint_msg = JointState()
+        joint_msg.header = header
+        joint_msg.name = list(solution.active_joints)
+        joint_msg.position = [float(solution.joint_values[name]) for name in solution.active_joints]
+        self.target_joint_state_pub.publish(joint_msg)
+
+    def _ik_target_pose_matrix(self, point_msg):
+        qx, qy, qz, qw = self.pose_orientation_xyzw
+        rotation = self._quat_to_matrix([qx, qy, qz, qw])
+        position = np.array([point_msg.x, point_msg.y, point_msg.z], dtype=np.float64)
+        position = position + np.asarray(self.ik_target_position_offset_xyz, dtype=np.float64).reshape(3)
+        ee_offset = np.asarray(self.ik_end_effector_offset_xyz, dtype=np.float64).reshape(3)
+        link_position = position - rotation @ ee_offset
+
+        target = np.eye(4, dtype=np.float64)
+        target[:3, :3] = rotation
+        target[:3, 3] = link_position
+        return target.tolist()
+
+    def _quat_to_matrix(self, quat_xyzw):
+        x, y, z, w = [float(v) for v in quat_xyzw]
+        norm = math.sqrt(x * x + y * y + z * z + w * w)
+        if norm == 0.0:
+            return np.eye(3, dtype=np.float64)
+        x, y, z, w = x / norm, y / norm, z / norm, w / norm
+        return np.array(
+            [
+                [1.0 - 2.0 * (y * y + z * z), 2.0 * (x * y - z * w), 2.0 * (x * z + y * w)],
+                [2.0 * (x * y + z * w), 1.0 - 2.0 * (x * x + z * z), 2.0 * (y * z - x * w)],
+                [2.0 * (x * z - y * w), 2.0 * (y * z + x * w), 1.0 - 2.0 * (x * x + y * y)],
+            ],
+            dtype=np.float64,
+        )
+
+    def _warn_ik(self, message):
+        now_sec = self.get_clock().now().nanoseconds * 1e-9
+        if now_sec - self._last_ik_warning_sec >= 2.0:
+            self.get_logger().warn(message)
+            self._last_ik_warning_sec = now_sec
+
     def _point_to_msg(self, point):
         msg = Point()
         msg.x = float(point[0])
@@ -674,10 +813,13 @@ def main(args=None):
     try:
         node = CoordinateProjectorNode()
         rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
     finally:
         if node is not None:
             node.destroy_node()
-        rclpy.shutdown()
+        if rclpy.ok():
+            rclpy.shutdown()
 
 
 if __name__ == '__main__':

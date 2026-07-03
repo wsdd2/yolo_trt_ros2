@@ -7,16 +7,18 @@ RGB/Depth/CameraInfo
   -> yolo_detector_node
   -> /detector/objects
   -> coordinate_projector_node
-  -> /detector/objects_3d, /detector/target_point, /detector/target_pose
+  -> /detector/objects_3d, /detector/target_point, /detector/target_pose, /detector/target_joint_state
+  -> web_dashboard_node
+  -> http://<H2-IP>:8080/
 ```
 
 H2 侧已有约定：
 
 - DDS 网卡通常是 `eth0`，必要时改成实际网卡名。
-- H2 机器人基座/身体坐标建议统一命名为 `pelvis` 或当前控制栈使用的 `base_link`。
+- H2 机器人基座/身体坐标当前配置为 `torso_link`。
 - 右腕虚拟末端可参考 `h2_handeye` 的 `R_ee = right_wrist_yaw_link + [0.05, 0, 0] m`。
 - 如果是 `eye-to-hand` 相机，优先使用 `T_cam2base.npy` 直接输出世界/基座坐标。
-- 如果是 `eye-in-hand` 相机，单独 `T_cam2hand.npy` 还不够，需要实时 FK/TF 提供 `T_base_hand`。
+- 当前正式配置使用 `eye-in-hand`：`/home/unitree/MscapeTech/Hand_Eye_Calib/outputs/eye_in_hand_20260630_150210.json`，节点会自动解析同名 `_npy/T_cam2hand.npy`，并通过 H2 当前关节 FK 输出 `torso_link` 坐标。
 
 ## 0. 变量约定
 
@@ -27,8 +29,10 @@ H2_HOST=unitree@<H2-PC2-IP>
 H2_WS=/home/unitree/MscapeTech
 FOXY_WS=/home/unitree/MscapeTech/Foxy_ROS
 MODEL_DIR=/home/unitree/MscapeTech/models
+ROS_DISTRO=humble
 ROS_DOMAIN_ID=42
 RMW_IMPLEMENTATION=rmw_fastrtps_cpp
+WEB_URL=http://<H2-PC2-IP>:8080/
 ```
 
 如果你的 H2 ROS/DDS 环境使用 CycloneDDS：
@@ -68,13 +72,17 @@ mv ~/tmp/yoloe-11s-seg.pt ~/MscapeTech/models/
 
 ## 2. H2 宿主机环境检查
 
-ROS2 Foxy 通常使用系统 Python 3.8。H2 上如果有 conda 环境，启动 ROS2 节点前建议退出 conda 并清理关键变量：
+H2 PC2 当前使用 ROS2 Humble，通常对应系统 Python 3.10。ROS2 编译和运行不要在 `h1_arm` conda 环境里执行，否则 Humble 的 Python 包会被 conda Python 污染，常见报错是 `ModuleNotFoundError: No module named 'em'`。
 
 ```bash
 conda deactivate 2>/dev/null || true
+conda deactivate 2>/dev/null || true
 unset PYTHONPATH
 unset LD_LIBRARY_PATH
-source /opt/ros/foxy/setup.bash
+unset AMENT_PREFIX_PATH
+unset CMAKE_PREFIX_PATH
+unset COLCON_PREFIX_PATH
+source /opt/ros/humble/setup.bash
 export ROS_DOMAIN_ID=42
 export ROS_DISABLE_DAEMON=1
 export RMW_IMPLEMENTATION=rmw_fastrtps_cpp
@@ -85,13 +93,16 @@ export RMW_IMPLEMENTATION=rmw_fastrtps_cpp
 ```bash
 sudo apt update
 sudo apt install -y \
+  python3-empy \
   python3-opencv \
   python3-numpy \
   python3-colcon-common-extensions \
-  ros-foxy-cv-bridge \
-  ros-foxy-image-tools \
-  ros-foxy-rqt-image-view \
-  ros-foxy-rmw-cyclonedds-cpp
+  ros-humble-cv-bridge \
+  ros-humble-image-tools \
+  ros-humble-rqt-image-view \
+  ros-humble-rosidl-default-generators \
+  ros-humble-rosidl-default-runtime \
+  ros-humble-rmw-cyclonedds-cpp
 ```
 
 检查 Python/ROS：
@@ -99,7 +110,7 @@ sudo apt install -y \
 ```bash
 which python3
 python3 --version
-python3 -c "import cv2; import numpy; import rclpy; import cv_bridge; print('ros python ok')"
+python3 -c "import em; import cv2; import numpy; import rclpy; import cv_bridge; print('numpy', numpy.__version__, numpy.__file__); print('cv2', cv2.__file__); print('ros humble python ok')"
 ```
 
 如果要跑 `backend: yoloe`：
@@ -114,7 +125,15 @@ python3 -c "import ultralytics; print('ultralytics ok')"
 
 ```bash
 cd ~/MscapeTech/Foxy_ROS
-source /opt/ros/foxy/setup.bash
+conda deactivate 2>/dev/null || true
+conda deactivate 2>/dev/null || true
+unset PYTHONPATH
+unset LD_LIBRARY_PATH
+unset AMENT_PREFIX_PATH
+unset CMAKE_PREFIX_PATH
+unset COLCON_PREFIX_PATH
+source /opt/ros/humble/setup.bash
+rm -rf build install log
 colcon build --symlink-install
 source install/setup.bash
 ```
@@ -165,11 +184,64 @@ coordinate_projector:
     handeye_target_frame: pelvis
 ```
 
-如果是 `eye-in-hand`，当前 ROS 感知节点还需要实时 FK/TF 才能输出世界坐标。过渡方案：
+如果是当前 H2 的 `eye-in-hand` 标定，推荐配置如下：
 
-- 先输出相机坐标：`handeye_npy_path: ''`，`target_frame: ''`。
-- 或由 H2 FK/TF 节点发布 `pelvis -> camera_color_optical_frame`，再设置 `target_frame: pelvis`。
-- `T_cam2hand.npy` 单独只能得到手腕/末端坐标，不能独立得到 `pelvis` 坐标。
+```yaml
+coordinate_projector:
+  ros__parameters:
+    handeye_mode: eye-in-hand
+    handeye_npy_path: /home/unitree/MscapeTech/Hand_Eye_Calib/outputs/eye_in_hand_20260630_150210.json
+    handeye_target_frame: torso_link
+    urdf_path: /home/unitree/MscapeTech/unitree_ros/robots/h2_description/H2.urdf
+    base_link: torso_link
+    hand_link: right_wrist_yaw_link
+    network_interface: eth0
+    domain_id: 0
+    lock_waist: true
+    h2_ee_offset_xyz: [0.05, 0.0, 0.0]
+    publish_target_joint_state: true
+    target_joint_state_topic: /detector/target_joint_state
+    ik_target_link: right_wrist_yaw_link
+    ik_active_joints: 'right_shoulder_pitch_joint,right_shoulder_roll_joint,right_shoulder_yaw_joint,right_elbow_joint,right_wrist_roll_joint,right_wrist_pitch_joint,right_wrist_yaw_joint'
+    ik_end_effector_offset_xyz: [0.05, 0.0, 0.0]
+```
+
+其中 `/detector/target_joint_state` 是 IK 解算出的目标关节角建议值，只读发布，不会直接控制机器人运动。
+
+网页端默认也在同一份配置里启用：
+
+```yaml
+web_dashboard:
+  ros__parameters:
+    web_host: '0.0.0.0'
+    web_port: 8080
+    debug_image_topic: /detector/debug_image
+    objects_topic: /detector/objects
+    objects_3d_topic: /detector/objects_3d
+    target_pose_topic: /detector/target_pose
+    target_joint_state_topic: /detector/target_joint_state
+```
+
+如果 `unitree_sdk2py` 只在 `h1_arm` conda 环境中能找到，不要直接在 `h1_arm` 里运行 ROS2 Humble。先用 conda 找 SDK 源码路径：
+
+```bash
+conda activate h1_arm
+python3 - <<'PY'
+import pathlib
+import unitree_sdk2py
+print(pathlib.Path(unitree_sdk2py.__file__).resolve().parents[1])
+PY
+conda deactivate
+```
+
+然后在 ROS2 Humble 终端中把上面打印出的目录加入 `PYTHONPATH`。常见路径示例：
+
+```bash
+export PYTHONPATH=/home/unitree/MscapeTech/unitree_sdk2_python:$PYTHONPATH
+python3 -c "from unitree_sdk2py.core.channel import ChannelFactoryInitialize; print('unitree_sdk2py ok')"
+```
+
+只有这个检查通过后，`eye-in-hand` 的实时 FK/IK 才能从 `rt/lowstate` 读取关节并输出 `point_target` 和 `target_joint_state`。
 
 ## 5. 启动真实相机
 
@@ -204,18 +276,34 @@ ros2 run image_tools cam2image --ros-args -r image:=/camera/color/image_raw
 
 ```bash
 cd ~/MscapeTech/Foxy_ROS
-source /opt/ros/foxy/setup.bash
+conda deactivate 2>/dev/null || true
+source /opt/ros/humble/setup.bash
 source install/setup.bash
+export PYTHONPATH=/home/unitree/MscapeTech/unitree_sdk2_python:$PYTHONPATH
 export ROS_DOMAIN_ID=42
 export ROS_DISABLE_DAEMON=1
 export RMW_IMPLEMENTATION=rmw_fastrtps_cpp
-ros2 launch yolo_trt_ros2 inspection_perception.launch.py
+ros2 launch yolo_trt_ros2 inspection_perception.launch.py \
+  config_file:=/home/unitree/MscapeTech/Foxy_ROS/src/yolo_trt_ros2/config/inspection_perception.yaml
+```
+
+启动后，在本地电脑浏览器打开：
+
+```text
+http://<H2-PC2-IP>:8080/
+```
+
+页面会显示实时 `/detector/debug_image` 视频、2D 框、类别、3D 目标点、目标位姿和 IK 关节角。也可以直接访问：
+
+```text
+http://<H2-PC2-IP>:8080/stream.mjpg
+http://<H2-PC2-IP>:8080/api/state
 ```
 
 终端 B 查看输出：
 
 ```bash
-source /opt/ros/foxy/setup.bash
+source /opt/ros/humble/setup.bash
 source ~/MscapeTech/Foxy_ROS/install/setup.bash
 export ROS_DOMAIN_ID=42
 export ROS_DISABLE_DAEMON=1
@@ -229,6 +317,7 @@ ros2 topic echo /detector/objects
 ros2 topic echo /detector/objects_3d
 ros2 topic echo /detector/target_point
 ros2 topic echo /detector/target_pose
+ros2 topic echo /detector/target_joint_state
 ```
 
 调试图：
@@ -242,7 +331,7 @@ rqt_image_view /detector/debug_image
 启动 benchmark 节点：
 
 ```bash
-source /opt/ros/foxy/setup.bash
+source /opt/ros/humble/setup.bash
 source ~/MscapeTech/Foxy_ROS/install/setup.bash
 export ROS_DOMAIN_ID=42
 export ROS_DISABLE_DAEMON=1
@@ -258,6 +347,7 @@ ros2 topic hz /detector/objects
 ros2 topic hz /detector/debug_image
 ros2 topic hz /detector/objects_3d
 ros2 topic hz /detector/target_point
+ros2 topic hz /detector/target_joint_state
 ```
 
 记录模板：
@@ -268,6 +358,7 @@ detector/objects hz:
 detector/debug_image hz:
 detector/objects_3d hz:
 target_point hz:
+target_joint_state hz:
 header age avg/min/max:
 ```
 
@@ -284,6 +375,7 @@ header age avg/min/max:
 ```bash
 timeout 5 ros2 topic echo /detector/objects_3d
 timeout 5 ros2 topic echo /detector/target_point
+timeout 5 ros2 topic echo /detector/target_joint_state
 ```
 
 检查点：
@@ -292,16 +384,18 @@ timeout 5 ros2 topic echo /detector/target_point
 valid: true
 depth_m: 合理，通常 0.2m 到 5.0m
 source_frame: camera_color_optical_frame 或相机实际 frame
-target_frame: pelvis/base_link/handeye_target_frame
+target_frame: torso_link/handeye_target_frame
 point_camera: 单位 m
 point_target: 单位 m
-message: camera_frame / handeye_npy / transformed
+message: camera_frame / eye_in_hand_fk / handeye_npy / transformed
+target_joint_state.name: IK 使用的右臂关节名
+target_joint_state.position: IK 目标关节角，单位 rad
 ```
 
-如果启用了 `handeye_npy_path`，`message` 应为：
+如果启用了当前 H2 的 `eye-in-hand` 配置，`message` 应为：
 
 ```text
-handeye_npy
+eye_in_hand_fk
 ```
 
 ## 9. 基准测试 3：H2 FK 与手眼坐标一致性
@@ -376,7 +470,7 @@ python -m h2_pipeline.part1.run_live_realsense \
 2. mock + 假 RGB 图像，确认 /detector/objects
 3. mock + 真实 RGB-D，确认 /detector/objects_3d
 4. YOLOE + 真实 RGB-D，记录 hz 和 header age
-5. 加 handeye_npy_path 或 TF，确认 target_frame 和 point_target
+5. 加 handeye_npy_path 或 TF，确认 target_frame、point_target 和 target_joint_state
 6. H2 compare_h2_fk.py，只读验证 FK 误差
 7. h2_pipeline part1 dry-run，只看 JSON
 8. 现场清空后再执行任何 H2 运动命令
@@ -397,6 +491,35 @@ ros2 topic list
 
 ```bash
 export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
+```
+
+### 网页打不开
+
+先确认节点启动日志里有：
+
+```text
+Web dashboard started: http://<H2-IP>:8080/
+```
+
+再在 H2 上检查端口：
+
+```bash
+ss -ltnp | grep 8080
+curl http://127.0.0.1:8080/api/state
+```
+
+如果 H2 本机能 curl，本地电脑打不开，优先检查两边是否在同一网段、是否能 ping 通 H2，以及现场网络是否拦截 8080 端口。端口冲突时把 `inspection_perception.yaml` 里的 `web_port` 改成 `8081` 后重新启动。
+
+如果 SSH 能连但网页端口被网络限制，可以在本地电脑开隧道：
+
+```bash
+ssh -L 8080:127.0.0.1:8080 unitree@<H2-PC2-IP>
+```
+
+然后本地浏览器访问：
+
+```text
+http://127.0.0.1:8080/
 ```
 
 ### debug image 有，3D 没有
@@ -429,6 +552,52 @@ backend: mock
 python3 -c "from ultralytics import YOLOE; print('YOLOE ok')"
 ls -lh /home/unitree/MscapeTech/models/yoloe-11s-seg.pt
 ```
+
+### cv2 / cv_bridge 报 NumPy 2.x 不兼容
+
+如果启动时报：
+
+```text
+A module that was compiled using NumPy 1.x cannot be run in NumPy 2.x
+AttributeError: _ARRAY_API not found
+ImportError: numpy.core.multiarray failed to import
+```
+
+说明系统里的 `cv2` 或 `cv_bridge` 是按 NumPy 1.x 编译的，但当前 Python 优先加载了 pip/用户目录里的 NumPy 2.x。H2 Humble 感知链路建议使用系统 Python 和 NumPy 1.x。
+
+先确认来源：
+
+```bash
+conda deactivate 2>/dev/null || true
+conda deactivate 2>/dev/null || true
+unset PYTHONPATH
+unset LD_LIBRARY_PATH
+source /opt/ros/humble/setup.bash
+
+which python3
+python3 -c "import numpy; print(numpy.__version__, numpy.__file__)"
+python3 -m pip show numpy opencv-python opencv-contrib-python opencv-python-headless
+```
+
+修复方式优先使用系统 apt 包，并移除 pip 版 OpenCV：
+
+```bash
+python3 -m pip uninstall -y opencv-python opencv-contrib-python opencv-python-headless
+python3 -m pip install --user "numpy<2"
+
+sudo apt install --reinstall -y \
+  python3-numpy \
+  python3-opencv \
+  ros-humble-cv-bridge
+```
+
+重新检查：
+
+```bash
+python3 -c "import numpy, cv2; from cv_bridge import CvBridge; print('numpy', numpy.__version__, numpy.__file__); print('cv2', cv2.__file__); print('cv_bridge ok')"
+```
+
+如果 `numpy.__version__` 仍然是 `2.x`，说明还有更高优先级的 pip 包在覆盖系统包，需要继续清理当前 `python3 -m pip show numpy` 显示的位置。
 
 ### 手眼文件加载失败
 

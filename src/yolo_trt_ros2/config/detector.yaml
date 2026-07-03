@@ -27,6 +27,7 @@ coordinate_projector:
     objects_3d_topic: /detector/objects_3d
     target_point_topic: /detector/target_point
     target_pose_topic: /detector/target_pose
+    target_joint_state_topic: /detector/target_joint_state
     target_frame: ''
     handeye_mode: eye-to-hand
     handeye_npy_path: ''
@@ -51,5 +52,31 @@ coordinate_projector:
     publish_invalid: false
     publish_target_pose: true
     target_pose_orientation_xyzw: [0.0, 0.0, 0.0, 1.0]
+    publish_target_joint_state: false
+    publish_failed_ik_solution: false
+    ik_target_link: ''
+    ik_active_joints: ''
+    ik_end_effector_offset_xyz: [0.0, 0.0, 0.0]
+    ik_target_position_offset_xyz: [0.0, 0.0, 0.0]
+    ik_max_iterations: 120
+    ik_tolerance_position: 0.005
+    ik_tolerance_orientation: 3.2
+    ik_damping: 0.001
+    ik_step_scale: 0.4
+    ik_position_weight: 1.0
+    ik_orientation_weight: 0.0
     stale_depth_sec: 0.5
     transform_timeout_sec: 0.05
+
+web_dashboard:
+  ros__parameters:
+    web_host: '0.0.0.0'
+    web_port: 8080
+    jpeg_quality: 80
+    frame_timeout_sec: 2.0
+    debug_image_topic: /detector/debug_image
+    objects_topic: /detector/objects
+    objects_3d_topic: /detector/objects_3d
+    target_point_topic: /detector/target_point
+    target_pose_topic: /detector/target_pose
+    target_joint_state_topic: /detector/target_joint_state

@@ -10,6 +10,7 @@ install(PROGRAMS
   yolo_trt_ros2/yolo_detector_node.py
   yolo_trt_ros2/coordinate_projector_node.py
   yolo_trt_ros2/benchmark_topics_node.py
+  yolo_trt_ros2/web_dashboard_node.py
   DESTINATION lib/${PROJECT_NAME}
 )
 

@@ -539,6 +539,13 @@ H2_DEPLOYMENT_AND_BENCHMARK.md
 - `/detector/objects_3d`：每个检测目标的 3D 坐标，`detector_msgs/Object3DArray`
 - `/detector/target_point`：当前最佳目标点，`geometry_msgs/PointStamped`
 - `/detector/target_pose`：当前最佳目标位姿，`geometry_msgs/PoseStamped`
+- `/detector/target_joint_state`：当前最佳目标的 IK 目标关节角建议值，`sensor_msgs/JointState`
+
+网页：
+
+- `http://<H2-IP>:8080/`：实时网页面板，显示 `/detector/debug_image`、2D 检测、3D 目标、位姿和 IK 关节角。
+- `http://<H2-IP>:8080/stream.mjpg`：MJPEG 视频流。
+- `http://<H2-IP>:8080/api/state`：实时 JSON 状态。
 
 ### 启动
 
@@ -595,7 +602,7 @@ coordinate_projector:
 
 这样 `Object3D.point_camera` 保留相机系坐标，`Object3D.point_target` 和 `/detector/target_point` 输出 `base_link` 坐标。
 
-注意：如果你的标定文件是 `eye-in-hand` 的 `T_cam2hand.npy`，单独这个矩阵只能得到末端/手腕坐标；要得到世界/基座坐标，还需要实时 FK 或 TF 提供当前 `T_base_hand`。
+注意：如果你的标定文件是 `eye-in-hand` 的 `T_cam2hand.npy`，单独这个矩阵只能得到末端/手腕坐标；要得到世界/基座坐标，还需要实时 FK 或 TF 提供当前 `T_base_hand`。H2 正式配置会从 `rt/lowstate` 读取当前关节，结合 `/home/unitree/MscapeTech/Hand_Eye_Calib/outputs/eye_in_hand_20260630_150210.json` 自动加载同名 `_npy/T_cam2hand.npy`，输出 `torso_link` 下的 3D 目标，并可发布 `/detector/target_joint_state` 给运控侧做安全校验和执行决策。
 
 ### 快速检查
 
@@ -603,7 +610,10 @@ coordinate_projector:
 ros2 topic echo /detector/objects
 ros2 topic echo /detector/objects_3d
 ros2 topic echo /detector/target_point
+ros2 topic echo /detector/target_joint_state
 ros2 topic hz /detector/debug_image
 ```
+
+启动 `inspection_perception.launch.py` 后，网页面板会随 `web_dashboard_node` 一起启动。H2 宿主机默认监听 `0.0.0.0:8080`，局域网内浏览器访问 `http://<H2-IP>:8080/` 即可。
 
 如果只想先验证 ROS 通信，把配置里的 `backend` 改为 `mock`，无需安装 `ultralytics` 或加载真实模型。

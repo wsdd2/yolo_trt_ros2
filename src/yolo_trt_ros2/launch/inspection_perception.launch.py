@@ -33,8 +33,17 @@ def generate_launch_description():
         parameters=[LaunchConfiguration('config_file')],
     )
 
+    web_dashboard_node = Node(
+        package='yolo_trt_ros2',
+        executable='web_dashboard_node',
+        name='web_dashboard',
+        output='screen',
+        parameters=[LaunchConfiguration('config_file')],
+    )
+
     return LaunchDescription([
         config_arg,
         detector_node,
         coordinate_node,
+        web_dashboard_node,
     ])

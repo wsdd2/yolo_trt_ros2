@@ -5,7 +5,7 @@ from dataclasses import dataclass
 import rclpy
 from geometry_msgs.msg import PointStamped, PoseStamped
 from rclpy.node import Node
-from sensor_msgs.msg import Image
+from sensor_msgs.msg import Image, JointState
 
 from detector_msgs.msg import Object2DArray, Object3DArray
 
@@ -53,6 +53,7 @@ class BenchmarkTopicsNode(Node):
         self.declare_parameter('objects_3d_topic', '/detector/objects_3d')
         self.declare_parameter('target_point_topic', '/detector/target_point')
         self.declare_parameter('target_pose_topic', '/detector/target_pose')
+        self.declare_parameter('target_joint_state_topic', '/detector/target_joint_state')
 
         self.period_sec = float(self.get_parameter('period_sec').value)
         topics = [
@@ -62,6 +63,7 @@ class BenchmarkTopicsNode(Node):
             (self.get_parameter('objects_3d_topic').value, Object3DArray),
             (self.get_parameter('target_point_topic').value, PointStamped),
             (self.get_parameter('target_pose_topic').value, PoseStamped),
+            (self.get_parameter('target_joint_state_topic').value, JointState),
         ]
 
         self.stats = {}
@@ -122,10 +124,13 @@ def main(args=None):
     try:
         node = BenchmarkTopicsNode()
         rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
     finally:
         if node is not None:
             node.destroy_node()
-        rclpy.shutdown()
+        if rclpy.ok():
+            rclpy.shutdown()
 
 
 if __name__ == '__main__':
