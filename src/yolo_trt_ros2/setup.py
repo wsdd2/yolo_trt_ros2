@@ -9,8 +9,14 @@ setup(
     data_files=[
         ('share/ament_index/resource_index/packages', ['resource/' + package_name]),
         ('share/' + package_name, ['package.xml']),
-        ('share/' + package_name + '/launch', ['launch/yolo_detector.launch.py']),
-        ('share/' + package_name + '/config', ['config/detector.yaml']),
+        ('share/' + package_name + '/launch', [
+            'launch/yolo_detector.launch.py',
+            'launch/inspection_perception.launch.py',
+        ]),
+        ('share/' + package_name + '/config', [
+            'config/detector.yaml',
+            'config/inspection_perception.yaml',
+        ]),
     ],
     install_requires=['setuptools'],
     zip_safe=True,
@@ -22,6 +28,7 @@ setup(
     entry_points={
         'console_scripts': [
             'yolo_detector_node = yolo_trt_ros2.yolo_detector_node:main',
+            'coordinate_projector_node = yolo_trt_ros2.coordinate_projector_node:main',
         ],
     },
 )

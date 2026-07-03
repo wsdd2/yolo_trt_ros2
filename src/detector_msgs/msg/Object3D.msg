@@ -1,0 +1,10 @@
+std_msgs/Header header
+Object2D detection
+bool valid
+bool cached
+string source_frame
+string target_frame
+float32 depth_m
+geometry_msgs/Point point_camera
+geometry_msgs/Point point_target
+string message

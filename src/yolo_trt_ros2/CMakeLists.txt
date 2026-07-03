@@ -8,6 +8,7 @@ ament_python_install_package(${PROJECT_NAME})
 
 install(PROGRAMS
   yolo_trt_ros2/yolo_detector_node.py
+  yolo_trt_ros2/coordinate_projector_node.py
   DESTINATION lib/${PROJECT_NAME}
 )
 

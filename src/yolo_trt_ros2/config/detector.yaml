@@ -4,10 +4,17 @@ yolo_detector:
     objects_topic: /detector/objects
     debug_image_topic: /detector/debug_image
     engine_path: ''
+    model_path: ''
+    model_kind: auto
     class_names_path: ''
     input_width: 640
     input_height: 640
+    imgsz: 640
     conf_thres: 0.25
     iou_thres: 0.45
     publish_debug_image: true
+    device: ''
+    prompt_free: false
+    best_handle_only: false
+    prompts: 'lever door handle,horizontal door handle,door lever handle,pull door handle'
     backend: mock

@@ -22,13 +22,20 @@ class YoloDetectorNode(Node):
         self.objects_topic = self.get_parameter('objects_topic').value
         self.debug_image_topic = self.get_parameter('debug_image_topic').value
         self.engine_path = self.get_parameter('engine_path').value
+        self.model_path = self.get_parameter('model_path').value
+        self.model_kind = str(self.get_parameter('model_kind').value).lower()
         self.class_names_path = self.get_parameter('class_names_path').value
         self.input_width = int(self.get_parameter('input_width').value)
         self.input_height = int(self.get_parameter('input_height').value)
+        self.imgsz = int(self.get_parameter('imgsz').value)
         self.conf_thres = float(self.get_parameter('conf_thres').value)
         self.iou_thres = float(self.get_parameter('iou_thres').value)
         self.publish_debug_image = bool(self.get_parameter('publish_debug_image').value)
         self.backend_name = str(self.get_parameter('backend').value).lower()
+        self.device = str(self.get_parameter('device').value)
+        self.prompt_free = bool(self.get_parameter('prompt_free').value)
+        self.best_handle_only = bool(self.get_parameter('best_handle_only').value)
+        self.prompts = self._parse_prompts(self.get_parameter('prompts').value)
 
         self.bridge = CvBridge()
         self.class_names = self._load_class_names(self.class_names_path)
@@ -53,13 +60,30 @@ class YoloDetectorNode(Node):
         self.declare_parameter('objects_topic', '/detector/objects')
         self.declare_parameter('debug_image_topic', '/detector/debug_image')
         self.declare_parameter('engine_path', '')
+        self.declare_parameter('model_path', '')
+        self.declare_parameter('model_kind', 'auto')
         self.declare_parameter('class_names_path', '')
         self.declare_parameter('input_width', 640)
         self.declare_parameter('input_height', 640)
+        self.declare_parameter('imgsz', 640)
         self.declare_parameter('conf_thres', 0.25)
         self.declare_parameter('iou_thres', 0.45)
         self.declare_parameter('publish_debug_image', True)
         self.declare_parameter('backend', 'mock')
+        self.declare_parameter('device', '')
+        self.declare_parameter('prompt_free', False)
+        self.declare_parameter('best_handle_only', False)
+        self.declare_parameter(
+            'prompts',
+            'lever door handle,horizontal door handle,door lever handle,pull door handle',
+        )
+
+    def _parse_prompts(self, value):
+        if value is None:
+            return []
+        if isinstance(value, str):
+            return [item.strip() for item in value.split(',') if item.strip()]
+        return [str(item).strip() for item in value if str(item).strip()]
 
     def _load_class_names(self, class_names_path):
         if not class_names_path:
@@ -93,7 +117,26 @@ class YoloDetectorNode(Node):
                 iou_thres=self.iou_thres,
             )
 
-        raise ValueError('Unsupported backend: %s. Use mock or tensorrt.' % self.backend_name)
+        if self.backend_name in ('ultralytics', 'yolo', 'yoloe'):
+            from yolo_trt_ros2.backends.ultralytics_backend import UltralyticsBackend
+
+            model_kind = self.model_kind
+            if self.backend_name in ('yolo', 'yoloe'):
+                model_kind = self.backend_name
+            return UltralyticsBackend(
+                model_path=self.model_path,
+                model_kind=model_kind,
+                class_names=self.class_names,
+                prompts=self.prompts,
+                conf_thres=self.conf_thres,
+                iou_thres=self.iou_thres,
+                imgsz=self.imgsz,
+                device=self.device,
+                prompt_free=self.prompt_free,
+                best_handle_only=self.best_handle_only,
+            )
+
+        raise ValueError('Unsupported backend: %s. Use mock, yoloe, yolo, ultralytics or tensorrt.' % self.backend_name)
 
     def _image_callback(self, image_msg):
         try:
@@ -130,8 +173,8 @@ class YoloDetectorNode(Node):
             obj.ymin = int(det.get('ymin', 0))
             obj.xmax = int(det.get('xmax', 0))
             obj.ymax = int(det.get('ymax', 0))
-            obj.cx = float(obj.xmin + obj.xmax) * 0.5
-            obj.cy = float(obj.ymin + obj.ymax) * 0.5
+            obj.cx = float(det.get('cx', float(obj.xmin + obj.xmax) * 0.5))
+            obj.cy = float(det.get('cy', float(obj.ymin + obj.ymax) * 0.5))
             msg.objects.append(obj)
 
         return msg
@@ -144,8 +187,11 @@ class YoloDetectorNode(Node):
             ymax = int(det.get('ymax', 0))
             class_name = str(det.get('class_name', 'unknown'))
             confidence = float(det.get('confidence', 0.0))
+            cx = int(round(float(det.get('cx', float(xmin + xmax) * 0.5))))
+            cy = int(round(float(det.get('cy', float(ymin + ymax) * 0.5))))
 
             cv2.rectangle(image, (xmin, ymin), (xmax, ymax), (0, 255, 0), 2)
+            cv2.circle(image, (cx, cy), 5, (0, 0, 255), -1)
             label = '%s %.2f' % (class_name, confidence)
             cv2.putText(
                 image,
