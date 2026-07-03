@@ -29,6 +29,7 @@ setup(
         'console_scripts': [
             'yolo_detector_node = yolo_trt_ros2.yolo_detector_node:main',
             'coordinate_projector_node = yolo_trt_ros2.coordinate_projector_node:main',
+            'benchmark_topics_node = yolo_trt_ros2.benchmark_topics_node:main',
         ],
     },
 )

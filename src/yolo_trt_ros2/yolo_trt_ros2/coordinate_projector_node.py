@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 import math
 import os
+import sys
+import time
+from pathlib import Path
 
 import numpy as np
 import rclpy
@@ -20,6 +23,60 @@ from detector_msgs.msg import Object3D, Object3DArray
 from detector_msgs.msg import Object2DArray
 
 
+G1_H2_JOINT_INDEX = {
+    'waist_yaw_joint': 12,
+    'waist_roll_joint': 13,
+    'waist_pitch_joint': 14,
+    'left_shoulder_pitch_joint': 15,
+    'left_shoulder_roll_joint': 16,
+    'left_shoulder_yaw_joint': 17,
+    'left_elbow_joint': 18,
+    'left_wrist_roll_joint': 19,
+    'left_wrist_pitch_joint': 20,
+    'left_wrist_yaw_joint': 21,
+    'right_shoulder_pitch_joint': 22,
+    'right_shoulder_roll_joint': 23,
+    'right_shoulder_yaw_joint': 24,
+    'right_elbow_joint': 25,
+    'right_wrist_roll_joint': 26,
+    'right_wrist_pitch_joint': 27,
+    'right_wrist_yaw_joint': 28,
+}
+
+
+class UnitreeLowStateJointReader:
+    """Tiny Unitree rt/lowstate reader used only when eye-in-hand FK is enabled."""
+
+    def __init__(self, network_interface='', domain_id=0):
+        from unitree_sdk2py.core.channel import ChannelFactoryInitialize, ChannelSubscriber
+        from unitree_sdk2py.idl.unitree_hg.msg.dds_ import LowState_
+
+        self._latest = None
+        if network_interface:
+            ChannelFactoryInitialize(int(domain_id), str(network_interface))
+        else:
+            ChannelFactoryInitialize(int(domain_id))
+        self._subscriber = ChannelSubscriber('rt/lowstate', LowState_)
+        self._subscriber.Init(self._on_lowstate, 10)
+
+    def _on_lowstate(self, msg):
+        self._latest = msg
+
+    def wait(self, timeout_sec=2.0):
+        deadline = time.time() + float(timeout_sec)
+        while self._latest is None and time.time() < deadline:
+            time.sleep(0.02)
+        return self._latest is not None
+
+    def joint_positions_by_name(self):
+        if self._latest is None:
+            return {}
+        return {
+            name: float(self._latest.motor_state[index].q)
+            for name, index in G1_H2_JOINT_INDEX.items()
+        }
+
+
 class CoordinateProjectorNode(Node):
     """Project 2D detector centers into camera-frame 3D coordinates."""
 
@@ -35,7 +92,19 @@ class CoordinateProjectorNode(Node):
         self.target_pose_topic = self.get_parameter('target_pose_topic').value
         self.target_frame = str(self.get_parameter('target_frame').value)
         self.handeye_npy_path = str(self.get_parameter('handeye_npy_path').value)
+        self.handeye_mode = str(self.get_parameter('handeye_mode').value).strip().lower().replace('_', '-')
         self.handeye_target_frame = str(self.get_parameter('handeye_target_frame').value)
+        self.robot_model = str(self.get_parameter('robot_model').value).strip().lower()
+        self.workspace_root = str(self.get_parameter('workspace_root').value)
+        self.urdf_path = str(self.get_parameter('urdf_path').value)
+        self.base_link = str(self.get_parameter('base_link').value)
+        self.hand_link = str(self.get_parameter('hand_link').value)
+        self.camera_link = str(self.get_parameter('camera_link').value)
+        self.network_interface = str(self.get_parameter('network_interface').value)
+        self.domain_id = int(self.get_parameter('domain_id').value)
+        self.joint_json_path = str(self.get_parameter('joint_json_path').value)
+        self.lock_waist = bool(self.get_parameter('lock_waist').value)
+        self.h2_ee_offset_xyz = self._get_float_list_parameter('h2_ee_offset_xyz', [0.05, 0.0, 0.0], 3)
         self.min_confidence = float(self.get_parameter('min_confidence').value)
         self.depth_radius = int(self.get_parameter('depth_radius').value)
         self.depth_scale = float(self.get_parameter('depth_scale').value)
@@ -56,11 +125,16 @@ class CoordinateProjectorNode(Node):
         self.latest_depth_msg = None
         self.latest_depth = None
         self.latest_camera_info = None
-        self.handeye_transform = self._load_handeye_transform(self.handeye_npy_path)
+        self.handeye_transform = None
+        self.T_cam2hand = None
+        self._fk_model = None
+        self._joint_reader = None
+        self._fk_error = ''
+        self._configure_handeye_and_fk()
 
         self.tf_buffer = None
         self.tf_listener = None
-        if self.target_frame and self.handeye_transform is None:
+        if self.target_frame and self.handeye_transform is None and self.T_cam2hand is None:
             if tf2_ros is None:
                 self.get_logger().warn('tf2_ros is not available; target_frame transform disabled.')
             else:
@@ -76,12 +150,13 @@ class CoordinateProjectorNode(Node):
         self.create_subscription(Object2DArray, self.objects_topic, self._objects_callback, 10)
 
         self.get_logger().info(
-            'Coordinate projector started: objects=%s, depth=%s, camera_info=%s, target_frame=%s, handeye=%s'
+            'Coordinate projector started: objects=%s, depth=%s, camera_info=%s, target_frame=%s, handeye_mode=%s, handeye=%s'
             % (
                 self.objects_topic,
                 self.depth_topic,
                 self.camera_info_topic,
                 self._output_frame_name(),
+                self.handeye_mode or '<none>',
                 self.handeye_npy_path or '<none>',
             )
         )
@@ -95,7 +170,19 @@ class CoordinateProjectorNode(Node):
         self.declare_parameter('target_pose_topic', '/detector/target_pose')
         self.declare_parameter('target_frame', '')
         self.declare_parameter('handeye_npy_path', '')
+        self.declare_parameter('handeye_mode', 'eye-to-hand')
         self.declare_parameter('handeye_target_frame', 'base_link')
+        self.declare_parameter('robot_model', 'h2')
+        self.declare_parameter('workspace_root', '/home/unitree/MscapeTech')
+        self.declare_parameter('urdf_path', '')
+        self.declare_parameter('base_link', '')
+        self.declare_parameter('hand_link', '')
+        self.declare_parameter('camera_link', '')
+        self.declare_parameter('network_interface', '')
+        self.declare_parameter('domain_id', 0)
+        self.declare_parameter('joint_json_path', '')
+        self.declare_parameter('lock_waist', True)
+        self.declare_parameter('h2_ee_offset_xyz', [0.05, 0.0, 0.0])
         self.declare_parameter('class_filter', '')
         self.declare_parameter('min_confidence', 0.25)
         self.declare_parameter('depth_radius', 3)
@@ -129,42 +216,150 @@ class CoordinateProjectorNode(Node):
             return default
         return values
 
+    def _configure_handeye_and_fk(self):
+        if not self.handeye_npy_path:
+            return
+
+        if self.handeye_mode in ('eye-in-hand', 'eyeinhand'):
+            self.T_cam2hand = self._load_eye_in_hand_transform(self.handeye_npy_path)
+            if self.T_cam2hand is not None:
+                self._configure_fk()
+            return
+
+        self.handeye_transform = self._load_handeye_transform(self.handeye_npy_path)
+
+    def _workspace_path(self, *parts):
+        return Path(os.path.expanduser(self.workspace_root)).joinpath(*parts)
+
+    def _resolve_urdf_path(self):
+        if self.urdf_path:
+            return Path(os.path.expanduser(self.urdf_path))
+        if self.robot_model == 'h2':
+            return self._workspace_path('unitree_ros', 'robots', 'h2_description', 'H2.urdf')
+        return self._workspace_path('unitree_ros', 'robots', 'g1_description', 'g1_29dof_rev_1_0.urdf')
+
+    def _default_base_link(self):
+        if self.base_link:
+            return self.base_link
+        if self.robot_model == 'h2':
+            return 'torso_link'
+        return 'pelvis'
+
+    def _default_hand_link(self):
+        if self.hand_link:
+            return self.hand_link
+        return 'right_wrist_yaw_link'
+
+    def _configure_fk(self):
+        urdf = self._resolve_urdf_path()
+        if not urdf.is_file():
+            self._fk_error = 'URDF does not exist: %s' % urdf
+            self.get_logger().warn(self._fk_error)
+            return
+
+        try:
+            workspace = Path(os.path.expanduser(self.workspace_root))
+            robot_kinematics_dir = workspace / 'robot_kinematics'
+            joint_to_pose_dir = robot_kinematics_dir / 'joint_to_pose'
+            for path in (robot_kinematics_dir, joint_to_pose_dir):
+                text = str(path)
+                if text not in sys.path:
+                    sys.path.insert(0, text)
+            from fk_urdf import URDFFK
+
+            self._fk_model = URDFFK(str(urdf))
+            self.urdf_path = str(urdf)
+            self.base_link = self._default_base_link()
+            self.hand_link = self._default_hand_link()
+            self.get_logger().info(
+                'Eye-in-hand FK enabled: robot=%s, urdf=%s, base=%s, hand=%s'
+                % (self.robot_model, self.urdf_path, self.base_link, self.hand_link)
+            )
+        except Exception as exc:
+            self._fk_error = 'Failed to initialize FK: %s' % exc
+            self.get_logger().warn(self._fk_error)
+            return
+
+        if self.joint_json_path:
+            return
+
+        try:
+            self._joint_reader = UnitreeLowStateJointReader(self.network_interface, self.domain_id)
+            if not self._joint_reader.wait(timeout_sec=2.0):
+                self.get_logger().warn('No rt/lowstate received yet; point_target will stay camera-only until joints arrive.')
+        except Exception as exc:
+            self._fk_error = 'Failed to initialize Unitree lowstate reader: %s' % exc
+            self.get_logger().warn(self._fk_error)
+
+    def _resolve_handeye_input(self, path):
+        resolved = Path(os.path.expanduser(path))
+        if resolved.suffix == '.json':
+            npy_dir = resolved.with_name(resolved.stem + '_npy')
+            if npy_dir.is_dir():
+                return npy_dir
+        return resolved
+
+    def _load_matrix_from_candidates(self, root, candidates):
+        root = self._resolve_handeye_input(root)
+        if root.is_file():
+            try:
+                transform = np.load(str(root)).astype(np.float64)
+            except Exception as exc:
+                self.get_logger().warn('Failed to load transform npy %s: %s' % (root, exc))
+                return None
+            if transform.shape != (4, 4):
+                self.get_logger().warn('transform must be 4x4, got shape=%s from %s' % (transform.shape, root))
+                return None
+            return transform, str(root)
+
+        if root.is_dir():
+            for name in candidates:
+                candidate = root / name
+                if candidate.is_file():
+                    try:
+                        transform = np.load(str(candidate)).astype(np.float64)
+                    except Exception as exc:
+                        self.get_logger().warn('Failed to load transform npy %s: %s' % (candidate, exc))
+                        return None
+                    if transform.shape != (4, 4):
+                        self.get_logger().warn(
+                            'transform must be 4x4, got shape=%s from %s' % (transform.shape, candidate)
+                        )
+                        return None
+                    return transform, str(candidate)
+
+        self.get_logger().warn('No supported transform found at: %s' % root)
+        return None
+
     def _load_handeye_transform(self, path):
         if not path:
             return None
 
-        resolved = os.path.expanduser(path)
-        if os.path.isdir(resolved):
-            candidates = [
-                'T_cam2base.npy',
-                'T_cam2world.npy',
-                'T_camera2base.npy',
-                'T_camera2world.npy',
-            ]
-            for name in candidates:
-                candidate = os.path.join(resolved, name)
-                if os.path.isfile(candidate):
-                    resolved = candidate
-                    break
-
-        if not os.path.isfile(resolved):
-            self.get_logger().warn('handeye_npy_path does not exist or has no supported transform: %s' % path)
+        loaded = self._load_matrix_from_candidates(
+            path,
+            ['T_cam2base.npy', 'T_cam2world.npy', 'T_camera2base.npy', 'T_camera2world.npy'],
+        )
+        if loaded is None:
             return None
+        transform, source = loaded
 
-        try:
-            transform = np.load(resolved).astype(np.float64)
-        except Exception as exc:
-            self.get_logger().warn('Failed to load hand-eye npy: %s' % exc)
+        self.get_logger().info('Loaded hand-eye camera-to-target transform: %s' % source)
+        return transform
+
+    def _load_eye_in_hand_transform(self, path):
+        loaded = self._load_matrix_from_candidates(
+            path,
+            ['T_cam2hand.npy', 'T_cam2ee.npy', 'T_camera2hand.npy', 'T_camera2ee.npy'],
+        )
+        if loaded is None:
             return None
-
-        if transform.shape != (4, 4):
-            self.get_logger().warn('hand-eye transform must be 4x4, got shape=%s' % (transform.shape,))
-            return None
-
-        self.get_logger().info('Loaded hand-eye camera-to-target transform: %s' % resolved)
+        transform, source = loaded
+        self.get_logger().info('Loaded eye-in-hand camera-to-hand transform: %s' % source)
         return transform
 
     def _output_frame_name(self):
+        if self.T_cam2hand is not None:
+            return self.handeye_target_frame or self.base_link or 'base_link'
         if self.handeye_transform is not None:
             return self.handeye_target_frame or self.target_frame or 'base_link'
         return self.target_frame or '<camera>'
@@ -242,7 +437,15 @@ class CoordinateProjectorNode(Node):
         target_frame = header.frame_id
         message = 'camera_frame'
 
-        if self.handeye_transform is not None:
+        if self.T_cam2hand is not None:
+            transformed = self._transform_eye_in_hand(point_camera)
+            if transformed is None:
+                message = 'camera_frame; eye_in_hand_unavailable: %s' % (self._fk_error or 'missing joints/FK')
+            else:
+                point_target = transformed
+                target_frame = self.handeye_target_frame or self.base_link or 'base_link'
+                message = 'eye_in_hand_fk'
+        elif self.handeye_transform is not None:
             point_target = self._apply_transform(self.handeye_transform, point_camera)
             target_frame = self.handeye_target_frame or self.target_frame or 'base_link'
             message = 'handeye_npy'
@@ -274,7 +477,9 @@ class CoordinateProjectorNode(Node):
         msg.valid = False
         msg.cached = False
         msg.source_frame = header.frame_id
-        if self.handeye_transform is not None:
+        if self.T_cam2hand is not None:
+            msg.target_frame = self._output_frame_name()
+        elif self.handeye_transform is not None:
             msg.target_frame = self._output_frame_name()
         else:
             msg.target_frame = self.target_frame or header.frame_id
@@ -362,6 +567,66 @@ class CoordinateProjectorNode(Node):
         point_h = np.ones(4, dtype=np.float64)
         point_h[:3] = np.asarray(point, dtype=np.float64).reshape(3)
         return (transform @ point_h)[:3]
+
+    def _transform_eye_in_hand(self, point_camera):
+        if self.T_cam2hand is None or self._fk_model is None:
+            return None
+        joints = self._current_joint_values()
+        if not joints:
+            self._fk_error = 'missing joint values'
+            return None
+        try:
+            T_base_hand = self._compute_base_to_hand(joints)
+        except Exception as exc:
+            self._fk_error = 'FK failed: %s' % exc
+            self.get_logger().warn(self._fk_error)
+            return None
+        point_h = np.ones(4, dtype=np.float64)
+        point_h[:3] = np.asarray(point_camera, dtype=np.float64).reshape(3)
+        point_hand = self.T_cam2hand @ point_h
+        point_target = T_base_hand @ point_hand
+        return point_target[:3]
+
+    def _current_joint_values(self):
+        if self.joint_json_path:
+            try:
+                import json
+                with open(os.path.expanduser(self.joint_json_path), 'r', encoding='utf-8') as f:
+                    payload = json.load(f)
+                if isinstance(payload, dict) and 'joint_values' in payload:
+                    payload = payload['joint_values']
+                if isinstance(payload, dict) and 'joints' in payload:
+                    payload = payload['joints']
+                return {str(k): float(v) for k, v in payload.items()}
+            except Exception as exc:
+                self._fk_error = 'failed to load joint_json_path: %s' % exc
+                return {}
+        if self._joint_reader is None:
+            return {}
+        return self._joint_reader.joint_positions_by_name()
+
+    def _compute_base_to_hand(self, joint_values):
+        targets = [self.hand_link]
+        poses = self._fk_model.compute_link_poses(
+            joint_values=self._lock_joint_values(joint_values),
+            targets=targets,
+            base_link=self.base_link or self._default_base_link(),
+            base_pose=np.eye(4, dtype=np.float64),
+            clamp_to_limits=False,
+        )
+        transform = np.asarray(poses[self.hand_link].matrix, dtype=np.float64)
+        if self.robot_model == 'h2':
+            offset = np.asarray(self.h2_ee_offset_xyz, dtype=np.float64).reshape(3)
+            transform = transform.copy()
+            transform[:3, 3] = transform[:3, 3] + transform[:3, :3] @ offset
+        return transform
+
+    def _lock_joint_values(self, joint_values):
+        out = dict(joint_values)
+        if self.lock_waist:
+            for name in ('waist_yaw_joint', 'waist_roll_joint', 'waist_pitch_joint'):
+                out[name] = 0.0
+        return out
 
     def _rotate_vector(self, vector, quat_xyzw):
         x, y, z, w = [float(v) for v in quat_xyzw]

@@ -518,6 +518,12 @@ cy: ...
 - `yolo_detector_node`：订阅 RGB 图像，发布 2D 检测框。
 - `coordinate_projector_node`：订阅 2D 检测、对齐深度图和 `CameraInfo`，发布相机系/目标系 3D 坐标。
 
+Unitree H2 上的部署流程、命令集和基准测试见：
+
+```text
+H2_DEPLOYMENT_AND_BENCHMARK.md
+```
+
 ### 主要 Topic
 
 输入：

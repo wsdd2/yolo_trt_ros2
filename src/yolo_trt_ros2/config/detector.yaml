@@ -21,5 +21,35 @@ yolo_detector:
 
 coordinate_projector:
   ros__parameters:
+    objects_topic: /detector/objects
+    depth_topic: /camera/aligned_depth_to_color/image_raw
+    camera_info_topic: /camera/color/camera_info
+    objects_3d_topic: /detector/objects_3d
+    target_point_topic: /detector/target_point
+    target_pose_topic: /detector/target_pose
+    target_frame: ''
+    handeye_mode: eye-to-hand
     handeye_npy_path: ''
     handeye_target_frame: base_link
+    robot_model: h2
+    workspace_root: /home/unitree/MscapeTech
+    urdf_path: ''
+    base_link: ''
+    hand_link: ''
+    camera_link: ''
+    network_interface: ''
+    domain_id: 0
+    joint_json_path: ''
+    lock_waist: true
+    h2_ee_offset_xyz: [0.05, 0.0, 0.0]
+    class_filter: ''
+    min_confidence: 0.25
+    depth_radius: 3
+    depth_scale: 0.001
+    min_depth_m: 0.10
+    max_depth_m: 5.0
+    publish_invalid: false
+    publish_target_pose: true
+    target_pose_orientation_xyzw: [0.0, 0.0, 0.0, 1.0]
+    stale_depth_sec: 0.5
+    transform_timeout_sec: 0.05

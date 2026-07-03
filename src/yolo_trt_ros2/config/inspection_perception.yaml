@@ -6,10 +6,10 @@ yolo_detector:
     backend: yoloe
     model_path: /foxy_ros_custom/models/yoloe-11s-seg.pt
     model_kind: yoloe
-    prompts: 'lever door handle,horizontal door handle,door lever handle,pull door handle'
+    prompts: 'red button,green button,black knob,selector switch,rotary switch,toggle switch,control panel switch,cabinet door handle,indicator light,pilot light'
     prompt_free: false
-    best_handle_only: true
-    conf_thres: 0.25
+    best_handle_only: false
+    conf_thres: 0.08
     iou_thres: 0.45
     imgsz: 640
     device: ''
@@ -24,8 +24,20 @@ coordinate_projector:
     target_point_topic: /detector/target_point
     target_pose_topic: /detector/target_pose
     target_frame: ''
-    handeye_npy_path: ''
-    handeye_target_frame: base_link
+    handeye_mode: eye-in-hand
+    handeye_npy_path: /home/unitree/MscapeTech/Hand_Eye_Calib/outputs/eye_in_hand_20260630_150210.json
+    handeye_target_frame: torso_link
+    robot_model: h2
+    workspace_root: /home/unitree/MscapeTech
+    urdf_path: /home/unitree/MscapeTech/unitree_ros/robots/h2_description/H2.urdf
+    base_link: torso_link
+    hand_link: right_wrist_yaw_link
+    camera_link: ''
+    network_interface: eth0
+    domain_id: 0
+    joint_json_path: ''
+    lock_waist: true
+    h2_ee_offset_xyz: [0.05, 0.0, 0.0]
     class_filter: ''
     min_confidence: 0.25
     depth_radius: 3
