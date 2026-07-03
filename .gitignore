@@ -1,0 +1,56 @@
+# Python bytecode and caches
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.pyre/
+.tox/
+.nox/
+
+# Python packaging and build artifacts
+build/
+dist/
+*.egg-info/
+.eggs/
+pip-wheel-metadata/
+htmlcov/
+.coverage
+.coverage.*
+coverage.xml
+
+# Virtual environments and local env files
+.venv/
+venv/
+env/
+ENV/
+.env
+.env.*
+
+# ROS2 / colcon workspace artifacts
+install/
+log/
+*.bag
+*.db3
+
+# Native extension and compiled artifacts
+*.so
+*.pyd
+*.dll
+*.dylib
+
+# Editor and OS noise
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# Local benchmark/output scratch files
+output/
+outputs/
+tmp/
+temp/
