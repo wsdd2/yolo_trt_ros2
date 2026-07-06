@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import json
 import math
 import os
 import sys
@@ -13,6 +14,7 @@ from rclpy.duration import Duration
 from rclpy.node import Node
 from rclpy.time import Time
 from sensor_msgs.msg import CameraInfo, Image, JointState
+from std_msgs.msg import String
 
 try:
     import tf2_ros
@@ -92,6 +94,8 @@ class CoordinateProjectorNode(Node):
         self.target_point_topic = self.get_parameter('target_point_topic').value
         self.target_pose_topic = self.get_parameter('target_pose_topic').value
         self.target_joint_state_topic = self.get_parameter('target_joint_state_topic').value
+        self.current_joint_state_topic = self.get_parameter('current_joint_state_topic').value
+        self.objects_ik_topic = self.get_parameter('objects_ik_topic').value
         self.target_frame = str(self.get_parameter('target_frame').value)
         self.handeye_npy_path = str(self.get_parameter('handeye_npy_path').value)
         self.handeye_mode = str(self.get_parameter('handeye_mode').value).strip().lower().replace('_', '-')
@@ -116,6 +120,8 @@ class CoordinateProjectorNode(Node):
         self.publish_invalid = bool(self.get_parameter('publish_invalid').value)
         self.publish_target_pose = bool(self.get_parameter('publish_target_pose').value)
         self.publish_target_joint_state = bool(self.get_parameter('publish_target_joint_state').value)
+        self.publish_current_joint_state = bool(self.get_parameter('publish_current_joint_state').value)
+        self.publish_objects_ik_json = bool(self.get_parameter('publish_objects_ik_json').value)
         self.publish_failed_ik_solution = bool(self.get_parameter('publish_failed_ik_solution').value)
         self.stale_depth_sec = float(self.get_parameter('stale_depth_sec').value)
         self.transform_timeout_sec = float(self.get_parameter('transform_timeout_sec').value)
@@ -136,6 +142,7 @@ class CoordinateProjectorNode(Node):
         self.ik_step_scale = float(self.get_parameter('ik_step_scale').value)
         self.ik_position_weight = float(self.get_parameter('ik_position_weight').value)
         self.ik_orientation_weight = float(self.get_parameter('ik_orientation_weight').value)
+        self.max_ik_objects = int(self.get_parameter('max_ik_objects').value)
 
         self.bridge = CvBridge()
         self.latest_depth_msg = None
@@ -164,6 +171,8 @@ class CoordinateProjectorNode(Node):
         self.target_point_pub = self.create_publisher(PointStamped, self.target_point_topic, 10)
         self.target_pose_pub = self.create_publisher(PoseStamped, self.target_pose_topic, 10)
         self.target_joint_state_pub = self.create_publisher(JointState, self.target_joint_state_topic, 10)
+        self.current_joint_state_pub = self.create_publisher(JointState, self.current_joint_state_topic, 10)
+        self.objects_ik_pub = self.create_publisher(String, self.objects_ik_topic, 10)
 
         self.create_subscription(Image, self.depth_topic, self._depth_callback, 10)
         self.create_subscription(CameraInfo, self.camera_info_topic, self._camera_info_callback, 10)
@@ -189,6 +198,8 @@ class CoordinateProjectorNode(Node):
         self.declare_parameter('target_point_topic', '/detector/target_point')
         self.declare_parameter('target_pose_topic', '/detector/target_pose')
         self.declare_parameter('target_joint_state_topic', '/detector/target_joint_state')
+        self.declare_parameter('current_joint_state_topic', '/detector/current_joint_state')
+        self.declare_parameter('objects_ik_topic', '/detector/objects_ik_json')
         self.declare_parameter('target_frame', '')
         self.declare_parameter('handeye_npy_path', '')
         self.declare_parameter('handeye_mode', 'eye-to-hand')
@@ -214,6 +225,8 @@ class CoordinateProjectorNode(Node):
         self.declare_parameter('publish_invalid', False)
         self.declare_parameter('publish_target_pose', True)
         self.declare_parameter('publish_target_joint_state', False)
+        self.declare_parameter('publish_current_joint_state', True)
+        self.declare_parameter('publish_objects_ik_json', True)
         self.declare_parameter('publish_failed_ik_solution', False)
         self.declare_parameter('target_pose_orientation_xyzw', [0.0, 0.0, 0.0, 1.0])
         self.declare_parameter('ik_target_link', '')
@@ -227,6 +240,7 @@ class CoordinateProjectorNode(Node):
         self.declare_parameter('ik_step_scale', 0.4)
         self.declare_parameter('ik_position_weight', 1.0)
         self.declare_parameter('ik_orientation_weight', 0.0)
+        self.declare_parameter('max_ik_objects', 24)
         self.declare_parameter('stale_depth_sec', 0.5)
         self.declare_parameter('transform_timeout_sec', 0.05)
 
@@ -262,7 +276,7 @@ class CoordinateProjectorNode(Node):
             return
 
         self.handeye_transform = self._load_handeye_transform(self.handeye_npy_path)
-        if self.handeye_transform is not None and self.publish_target_joint_state:
+        if self.handeye_transform is not None and (self.publish_target_joint_state or self.publish_objects_ik_json):
             self._configure_fk()
 
     def _workspace_path(self, *parts):
@@ -318,7 +332,7 @@ class CoordinateProjectorNode(Node):
             self.get_logger().warn(self._fk_error)
             return
 
-        if self.publish_target_joint_state:
+        if self.publish_target_joint_state or self.publish_objects_ik_json:
             try:
                 from ik_urdf import URDFIK
 
@@ -467,6 +481,10 @@ class CoordinateProjectorNode(Node):
                 best_obj = object_3d
 
         self.objects_3d_pub.publish(out_msg)
+        joints = self._current_joint_values()
+        if joints:
+            self._publish_current_joint_state(joints, objects_msg.header)
+        self._publish_objects_ik_json(out_msg, objects_msg.header, joints)
         if best_obj is not None:
             self._publish_target(best_obj)
 
@@ -704,6 +722,124 @@ class CoordinateProjectorNode(Node):
         uv = np.cross(qvec, vec)
         uuv = np.cross(qvec, uv)
         return vec + 2.0 * (w * uv + uuv)
+
+    def _publish_current_joint_state(self, joints, header):
+        if not self.publish_current_joint_state:
+            return
+        msg = JointState()
+        msg.header.stamp = header.stamp
+        msg.header.frame_id = self.base_link or self._default_base_link()
+        names = sorted(joints.keys())
+        msg.name = names
+        msg.position = [float(joints[name]) for name in names]
+        self.current_joint_state_pub.publish(msg)
+
+    def _publish_objects_ik_json(self, objects_3d_msg, header, joints):
+        if not self.publish_objects_ik_json:
+            return
+
+        payload = {
+            'header': {
+                'stamp': {
+                    'sec': int(header.stamp.sec),
+                    'nanosec': int(header.stamp.nanosec),
+                },
+                'frame_id': str(header.frame_id),
+            },
+            'base_link': self.base_link or self._default_base_link(),
+            'target_link': self.ik_target_link or self.hand_link or self._default_hand_link(),
+            'current_joint_values_rad': {str(k): float(v) for k, v in (joints or {}).items()},
+            'objects': [],
+            'message': 'ok',
+        }
+
+        if not joints:
+            payload['message'] = 'missing current joint values'
+            self._publish_json_string(self.objects_ik_pub, payload)
+            return
+        if self._ik_solver is None:
+            payload['message'] = 'IK solver unavailable: %s' % (self._ik_error or 'not initialized')
+            self._publish_json_string(self.objects_ik_pub, payload)
+            return
+
+        solved = 0
+        for index, object_3d in enumerate(objects_3d_msg.objects):
+            item = {
+                'object_id': self._object_id(index, object_3d.detection.class_name),
+                'class_name': str(object_3d.detection.class_name),
+                'class_id': int(object_3d.detection.class_id),
+                'confidence': float(object_3d.detection.confidence),
+                'bbox_xyxy': [
+                    int(object_3d.detection.xmin),
+                    int(object_3d.detection.ymin),
+                    int(object_3d.detection.xmax),
+                    int(object_3d.detection.ymax),
+                ],
+                'center_px': [float(object_3d.detection.cx), float(object_3d.detection.cy)],
+                'valid_3d': bool(object_3d.valid),
+                'target_frame': str(object_3d.target_frame),
+                'point_target': self._point_payload(object_3d.point_target),
+                'ik': None,
+            }
+            if not object_3d.valid:
+                item['ik'] = {'success': False, 'message': object_3d.message or 'invalid 3D object'}
+                payload['objects'].append(item)
+                continue
+            if solved >= max(0, self.max_ik_objects):
+                item['ik'] = {'success': False, 'message': 'skipped: max_ik_objects reached'}
+                payload['objects'].append(item)
+                continue
+            try:
+                solution = self._solve_object_ik(object_3d, joints)
+                item['ik'] = {
+                    'success': bool(solution.success),
+                    'message': str(solution.message),
+                    'iterations': int(solution.iterations),
+                    'position_error_m': float(solution.final_position_error_norm),
+                    'orientation_error_rad': float(solution.final_orientation_error_norm),
+                    'active_joints': [str(name) for name in solution.active_joints],
+                    'joint_values_rad': {
+                        str(name): float(solution.joint_values[name])
+                        for name in solution.active_joints
+                    },
+                }
+                solved += 1
+            except Exception as exc:
+                item['ik'] = {'success': False, 'message': 'IK failed: %s' % exc}
+            payload['objects'].append(item)
+
+        self._publish_json_string(self.objects_ik_pub, payload)
+
+    def _publish_json_string(self, publisher, payload):
+        msg = String()
+        msg.data = json.dumps(payload, ensure_ascii=False)
+        publisher.publish(msg)
+
+    def _solve_object_ik(self, object_3d, joints):
+        target_pose = self._ik_target_pose_matrix(object_3d.point_target)
+        return self._ik_solver.solve(
+            target_link=self.ik_target_link or self.hand_link or self._default_hand_link(),
+            target_pose=target_pose,
+            initial_joint_values=self._lock_joint_values(joints),
+            active_joints=self.ik_active_joints or None,
+            base_link=self.base_link or self._default_base_link(),
+            base_pose=np.eye(4, dtype=np.float64).tolist(),
+            max_iterations=self.ik_max_iterations,
+            tolerance_position=self.ik_tolerance_position,
+            tolerance_orientation=self.ik_tolerance_orientation,
+            damping=self.ik_damping,
+            step_scale=self.ik_step_scale,
+            position_weight=self.ik_position_weight,
+            orientation_weight=self.ik_orientation_weight,
+            clamp_to_limits=True,
+        )
+
+    def _object_id(self, index, class_name):
+        safe = ''.join(ch if ch.isalnum() else '_' for ch in str(class_name).lower()).strip('_')
+        return '%02d_%s' % (int(index), safe or 'object')
+
+    def _point_payload(self, point):
+        return {'x': float(point.x), 'y': float(point.y), 'z': float(point.z)}
 
     def _publish_target(self, object_3d):
         header = object_3d.header

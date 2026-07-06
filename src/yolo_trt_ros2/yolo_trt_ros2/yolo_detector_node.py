@@ -25,6 +25,7 @@ class YoloDetectorNode(Node):
         self.model_path = self.get_parameter('model_path').value
         self.model_kind = str(self.get_parameter('model_kind').value).lower()
         self.class_names_path = self.get_parameter('class_names_path').value
+        self.yoloe_classes_path = str(self.get_parameter('yoloe_classes_path').value)
         self.input_width = int(self.get_parameter('input_width').value)
         self.input_height = int(self.get_parameter('input_height').value)
         self.imgsz = int(self.get_parameter('imgsz').value)
@@ -35,12 +36,15 @@ class YoloDetectorNode(Node):
         self.device = str(self.get_parameter('device').value)
         self.prompt_free = bool(self.get_parameter('prompt_free').value)
         self.best_handle_only = bool(self.get_parameter('best_handle_only').value)
+        self.filter_prompt_free_handles = bool(self.get_parameter('filter_prompt_free_handles').value)
         self.mobileclip_path = str(self.get_parameter('mobileclip_path').value)
         self.detect_blue_point = bool(self.get_parameter('detect_blue_point').value)
         self.blue_point_class_name = str(self.get_parameter('blue_point_class_name').value)
         self.blue_point_min_area = float(self.get_parameter('blue_point_min_area').value)
         self.blue_point_max_area_ratio = float(self.get_parameter('blue_point_max_area_ratio').value)
-        self.prompts = self._parse_prompts(self.get_parameter('prompts').value)
+        self.prompts = self._load_yoloe_classes(self.yoloe_classes_path)
+        if not self.prompts:
+            self.prompts = self._parse_list_value(self.get_parameter('prompts').value)
 
         self.bridge = CvBridge()
         self.class_names = self._load_class_names(self.class_names_path)
@@ -68,6 +72,7 @@ class YoloDetectorNode(Node):
         self.declare_parameter('model_path', '')
         self.declare_parameter('model_kind', 'auto')
         self.declare_parameter('class_names_path', '')
+        self.declare_parameter('yoloe_classes_path', '')
         self.declare_parameter('input_width', 640)
         self.declare_parameter('input_height', 640)
         self.declare_parameter('imgsz', 640)
@@ -78,6 +83,7 @@ class YoloDetectorNode(Node):
         self.declare_parameter('device', '')
         self.declare_parameter('prompt_free', False)
         self.declare_parameter('best_handle_only', False)
+        self.declare_parameter('filter_prompt_free_handles', False)
         self.declare_parameter('mobileclip_path', '')
         self.declare_parameter('detect_blue_point', False)
         self.declare_parameter('blue_point_class_name', 'blue push point')
@@ -88,27 +94,43 @@ class YoloDetectorNode(Node):
             'lever door handle,horizontal door handle,door lever handle,pull door handle',
         )
 
-    def _parse_prompts(self, value):
+    def _parse_list_value(self, value):
         if value is None:
             return []
         if isinstance(value, str):
             return [item.strip() for item in value.split(',') if item.strip()]
         return [str(item).strip() for item in value if str(item).strip()]
 
+    def _load_yoloe_classes(self, path):
+        classes = self._load_text_list(path, 'yoloe_classes_path')
+        if classes:
+            self.get_logger().info('Loaded %d YOLOE classes from %s' % (len(classes), path))
+        return classes
+
     def _load_class_names(self, class_names_path):
-        if not class_names_path:
+        return self._load_text_list(class_names_path, 'class_names_path')
+
+    def _load_text_list(self, path, label):
+        if not path:
             return []
-        if not os.path.exists(class_names_path):
-            self.get_logger().warn('class_names_path does not exist: %s' % class_names_path)
+        expanded = os.path.expanduser(str(path))
+        if not os.path.exists(expanded):
+            self.get_logger().warn('%s does not exist: %s' % (label, expanded))
             return []
 
-        class_names = []
-        with open(class_names_path, 'r') as names_file:
+        values = []
+        with open(expanded, 'r', encoding='utf-8') as names_file:
             for line in names_file:
-                name = line.strip()
-                if name and not name.startswith('#'):
-                    class_names.append(name)
-        return class_names
+                text = line.strip()
+                if not text or text.startswith('#'):
+                    continue
+                if '#' in text:
+                    text = text.split('#', 1)[0].strip()
+                for item in text.split(','):
+                    name = item.strip()
+                    if name:
+                        values.append(name)
+        return values
 
     def _create_backend(self):
         if self.backend_name == 'mock':
@@ -145,6 +167,7 @@ class YoloDetectorNode(Node):
                 prompt_free=self.prompt_free,
                 best_handle_only=self.best_handle_only,
                 mobileclip_path=self.mobileclip_path,
+                filter_prompt_free_handles=self.filter_prompt_free_handles,
             )
 
         raise ValueError('Unsupported backend: %s. Use mock, yoloe, yolo, ultralytics or tensorrt.' % self.backend_name)

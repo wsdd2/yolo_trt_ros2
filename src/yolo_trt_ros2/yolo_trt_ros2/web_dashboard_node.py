@@ -10,6 +10,7 @@ from cv_bridge import CvBridge
 from geometry_msgs.msg import PointStamped, PoseStamped
 from rclpy.node import Node
 from sensor_msgs.msg import Image, JointState
+from std_msgs.msg import String
 
 from detector_msgs.msg import Object2DArray, Object3DArray
 
@@ -100,13 +101,61 @@ INDEX_HTML = """<!doctype html>
     }
     .dot.ok { background: var(--ok); }
     .dot.warn { background: var(--warn); }
+    .preview {
+      position: relative;
+      width: 100%;
+      min-height: 360px;
+      background: #050708;
+      overflow: hidden;
+    }
     .video {
       width: 100%;
-      height: 100%;
-      min-height: 360px;
-      object-fit: contain;
-      background: #050708;
+      height: auto;
       display: block;
+    }
+    #overlay {
+      position: absolute;
+      inset: 0;
+      pointer-events: none;
+    }
+    .bbox {
+      position: absolute;
+      border: 2px solid var(--ok);
+      box-shadow: 0 0 0 1px rgba(0,0,0,.55);
+      pointer-events: auto;
+      cursor: copy;
+    }
+    .bbox.unstable {
+      border-color: var(--warn);
+      cursor: default;
+    }
+    .bbox-label {
+      position: absolute;
+      left: 0;
+      top: -22px;
+      max-width: 280px;
+      padding: 2px 6px;
+      background: rgba(0,0,0,.76);
+      color: var(--text);
+      font-size: 12px;
+      line-height: 18px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    #tooltip {
+      position: fixed;
+      z-index: 20;
+      display: none;
+      max-width: 440px;
+      padding: 8px 10px;
+      border: 1px solid var(--accent);
+      border-radius: 6px;
+      background: rgba(13,17,21,.96);
+      color: var(--text);
+      white-space: pre-wrap;
+      pointer-events: none;
+      font-variant-numeric: tabular-nums;
     }
     .side {
       display: grid;
@@ -143,6 +192,7 @@ INDEX_HTML = """<!doctype html>
       font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
       word-break: break-word;
     }
+    .copy { color: var(--accent); }
     .empty {
       color: var(--muted);
       padding: 12px 0;
@@ -156,7 +206,7 @@ INDEX_HTML = """<!doctype html>
 <body>
   <header>
     <h1>Inspection Perception Dashboard</h1>
-    <div class="status"><span id="dot" class="dot"></span><span id="status">connecting</span></div>
+    <div class="status"><span id="copy" class="copy"></span><span id="dot" class="dot"></span><span id="status">connecting</span></div>
   </header>
   <main>
     <section class="video-wrap">
@@ -164,7 +214,10 @@ INDEX_HTML = """<!doctype html>
         <span>debug image stream</span>
         <span id="imageMeta" class="mono">--</span>
       </div>
-      <img class="video" src="/stream.mjpg" alt="debug image stream">
+      <div id="preview" class="preview">
+        <img id="stream" class="video" src="/stream.mjpg" alt="debug image stream">
+        <div id="overlay"></div>
+      </div>
     </section>
     <div class="side">
       <section>
@@ -193,9 +246,143 @@ INDEX_HTML = """<!doctype html>
       </section>
     </div>
   </main>
+  <div id="tooltip"></div>
   <script>
     const fmt = (v, digits = 3) => Number.isFinite(v) ? Number(v).toFixed(digits) : "--";
     const stamp = h => h && h.stamp ? `${h.stamp.sec}.${String(h.stamp.nanosec).padStart(9, "0")}` : "--";
+    const tracks = new Map();
+    let latestData = null;
+
+    function iou(a, b) {
+      const ix1 = Math.max(a[0], b[0]);
+      const iy1 = Math.max(a[1], b[1]);
+      const ix2 = Math.min(a[2], b[2]);
+      const iy2 = Math.min(a[3], b[3]);
+      const inter = Math.max(0, ix2 - ix1) * Math.max(0, iy2 - iy1);
+      const areaA = Math.max(1, (a[2] - a[0]) * (a[3] - a[1]));
+      const areaB = Math.max(1, (b[2] - b[0]) * (b[3] - b[1]));
+      return inter / Math.max(1, areaA + areaB - inter);
+    }
+
+    function updateTracks(objects) {
+      const now = Date.now();
+      const used = new Set();
+      objects.forEach((obj, index) => {
+        const box = obj.bbox_xyxy || [0, 0, 0, 0];
+        let bestKey = null;
+        let bestIou = 0;
+        for (const [key, tr] of tracks.entries()) {
+          if (used.has(key) || tr.className !== obj.class_name) continue;
+          const score = iou(box, tr.box);
+          if (score > bestIou) {
+            bestIou = score;
+            bestKey = key;
+          }
+        }
+        if (bestKey && bestIou >= 0.45) {
+          const tr = tracks.get(bestKey);
+          tr.box = box;
+          tr.lastSeen = now;
+          obj.stable_ms = now - tr.firstSeen;
+          obj.track_key = bestKey;
+          used.add(bestKey);
+        } else {
+          const key = `${obj.class_name}:${index}:${now}`;
+          tracks.set(key, { className: obj.class_name, box, firstSeen: now, lastSeen: now });
+          obj.stable_ms = 0;
+          obj.track_key = key;
+          used.add(key);
+        }
+      });
+      for (const [key, tr] of tracks.entries()) {
+        if (now - tr.lastSeen > 1500) tracks.delete(key);
+      }
+    }
+
+    function coordText(obj) {
+      const p = obj.point_torso_m;
+      if (!p) return "world unavailable";
+      return `[${p.map(v => fmt(v, 4)).join(", ")}]`;
+    }
+
+    function ikText(obj) {
+      const ik = obj.ik;
+      if (!ik || !ik.joint_values_rad) return "ik unavailable";
+      return Object.entries(ik.joint_values_rad).map(([k, v]) => `${k}: ${fmt(v, 5)}`).join("\\n");
+    }
+
+    async function copyText(text) {
+      if (navigator.clipboard && window.isSecureContext) {
+        await navigator.clipboard.writeText(text);
+        return;
+      }
+      const area = document.createElement("textarea");
+      area.value = text;
+      area.style.position = "fixed";
+      area.style.left = "-9999px";
+      document.body.appendChild(area);
+      area.focus();
+      area.select();
+      document.execCommand("copy");
+      document.body.removeChild(area);
+    }
+
+    function renderOverlay(data) {
+      const overlay = document.getElementById("overlay");
+      const stream = document.getElementById("stream");
+      overlay.innerHTML = "";
+      const objects = (data.objects || []).filter(o => o && o.bbox_xyxy);
+      updateTracks(objects);
+      const info = data.image || {};
+      const srcW = info.width || stream.naturalWidth || 1280;
+      const srcH = info.height || stream.naturalHeight || 720;
+      const rect = stream.getBoundingClientRect();
+      const sx = rect.width / srcW;
+      const sy = rect.height / srcH;
+
+      objects.forEach(obj => {
+        const box = obj.bbox_xyxy;
+        const stable = (obj.stable_ms || 0) >= 3000;
+        const div = document.createElement("div");
+        div.className = "bbox" + (stable ? "" : " unstable");
+        div.style.left = `${box[0] * sx}px`;
+        div.style.top = `${box[1] * sy}px`;
+        div.style.width = `${Math.max(4, (box[2] - box[0]) * sx)}px`;
+        div.style.height = `${Math.max(4, (box[3] - box[1]) * sy)}px`;
+
+        const label = document.createElement("div");
+        label.className = "bbox-label";
+        label.textContent = `${obj.object_id || ""} ${obj.class_name} ${fmt(obj.confidence, 2)}`;
+        div.appendChild(label);
+
+        div.addEventListener("mousemove", ev => {
+          const tooltip = document.getElementById("tooltip");
+          if (stable) {
+            tooltip.textContent =
+              `${label.textContent}\\nworld ${coordText(obj)}\\n${ikText(obj)}\\nclick to copy world`;
+          } else {
+            tooltip.textContent =
+              `${label.textContent}\\nstabilizing ${fmt((obj.stable_ms || 0) / 1000, 1)}/3.0s`;
+          }
+          tooltip.style.display = "block";
+          tooltip.style.left = `${ev.clientX + 14}px`;
+          tooltip.style.top = `${ev.clientY + 14}px`;
+        });
+        div.addEventListener("mouseleave", () => {
+          document.getElementById("tooltip").style.display = "none";
+        });
+        div.addEventListener("click", async () => {
+          if (!stable || !obj.point_torso_m) return;
+          const text = coordText(obj);
+          await copyText(text);
+          const copy = document.getElementById("copy");
+          copy.textContent = `copied ${text}`;
+          setTimeout(() => { copy.textContent = ""; }, 1800);
+        });
+        overlay.appendChild(div);
+      });
+    }
+
     function setRows(tbody, rows, emptyCols) {
       tbody.innerHTML = "";
       if (!rows.length) {
@@ -234,12 +421,14 @@ INDEX_HTML = """<!doctype html>
       try {
         const res = await fetch("/api/state", { cache: "no-store" });
         const data = await res.json();
+        latestData = data;
         const age = data.server_time - data.last_update_time;
         const dot = document.getElementById("dot");
         dot.className = "dot " + (age < 1.5 ? "ok" : age < 5 ? "warn" : "");
-        document.getElementById("status").textContent = `age ${fmt(age, 2)}s`;
+        document.getElementById("status").textContent = `age ${fmt(age, 2)}s objects=${(data.objects || []).length}`;
         document.getElementById("imageMeta").textContent = `${data.image.width || "--"}x${data.image.height || "--"} q=${data.image.jpeg_quality}`;
         document.getElementById("objectMeta").textContent = `${data.objects2d.objects.length} objects`;
+        renderOverlay(data);
         const objectRows = data.objects2d.objects.map(o => {
           const tr = document.createElement("tr");
           [o.class_name, fmt(o.confidence, 2), `${o.xmin},${o.ymin},${o.xmax},${o.ymax}`, `${fmt(o.cx, 1)},${fmt(o.cy, 1)}`]
@@ -276,10 +465,12 @@ INDEX_HTML = """<!doctype html>
         } else {
           kv(document.getElementById("target3d"), []);
         }
-        document.getElementById("jointMeta").textContent = `${data.target_joint_state.name.length} joints`;
-        const jointRows = data.target_joint_state.name.map((name, i) => {
+        const jointState = data.target_joint_state.name.length ? data.target_joint_state : data.current_joint_state;
+        const jointKind = data.target_joint_state.name.length ? "target" : "current";
+        document.getElementById("jointMeta").textContent = `${jointKind} ${jointState.name.length} joints`;
+        const jointRows = jointState.name.map((name, i) => {
           const tr = document.createElement("tr");
-          [name, fmt(data.target_joint_state.position[i], 5)].forEach(text => {
+          [name, fmt(jointState.position[i], 5)].forEach(text => {
             const td = document.createElement("td");
             td.className = "mono";
             td.textContent = text;
@@ -293,6 +484,7 @@ INDEX_HTML = """<!doctype html>
         document.getElementById("status").textContent = "disconnected";
       }
     }
+    window.addEventListener("resize", () => { if (latestData) renderOverlay(latestData); });
     setInterval(refresh, 300);
     refresh();
   </script>
@@ -316,6 +508,8 @@ class DashboardState:
         self.target_point = None
         self.target_pose = None
         self.target_joint_state = None
+        self.current_joint_state = None
+        self.objects_ik_json = None
 
 
 class WebDashboardNode(Node):
@@ -335,6 +529,8 @@ class WebDashboardNode(Node):
         self.target_point_topic = self.get_parameter('target_point_topic').value
         self.target_pose_topic = self.get_parameter('target_pose_topic').value
         self.target_joint_state_topic = self.get_parameter('target_joint_state_topic').value
+        self.current_joint_state_topic = self.get_parameter('current_joint_state_topic').value
+        self.objects_ik_topic = self.get_parameter('objects_ik_topic').value
 
         self.bridge = CvBridge()
         self.state = DashboardState()
@@ -346,6 +542,8 @@ class WebDashboardNode(Node):
         self.create_subscription(PointStamped, self.target_point_topic, self._target_point_callback, 10)
         self.create_subscription(PoseStamped, self.target_pose_topic, self._target_pose_callback, 10)
         self.create_subscription(JointState, self.target_joint_state_topic, self._joint_state_callback, 10)
+        self.create_subscription(JointState, self.current_joint_state_topic, self._current_joint_state_callback, 10)
+        self.create_subscription(String, self.objects_ik_topic, self._objects_ik_callback, 10)
 
         handler_cls = self._make_handler()
         self.server = ThreadingHTTPServer((self.host, self.port), handler_cls)
@@ -369,6 +567,8 @@ class WebDashboardNode(Node):
         self.declare_parameter('target_point_topic', '/detector/target_point')
         self.declare_parameter('target_pose_topic', '/detector/target_pose')
         self.declare_parameter('target_joint_state_topic', '/detector/target_joint_state')
+        self.declare_parameter('current_joint_state_topic', '/detector/current_joint_state')
+        self.declare_parameter('objects_ik_topic', '/detector/objects_ik_json')
 
     def _image_callback(self, msg):
         try:
@@ -412,6 +612,21 @@ class WebDashboardNode(Node):
     def _joint_state_callback(self, msg):
         with self.state.lock:
             self.state.target_joint_state = msg
+            self.state.last_update_time = time.time()
+
+    def _current_joint_state_callback(self, msg):
+        with self.state.lock:
+            self.state.current_joint_state = msg
+            self.state.last_update_time = time.time()
+
+    def _objects_ik_callback(self, msg):
+        try:
+            payload = json.loads(msg.data) if msg.data else None
+        except Exception as exc:
+            self.get_logger().warn('Failed to parse objects IK JSON: %s' % exc)
+            return
+        with self.state.lock:
+            self.state.objects_ik_json = payload
             self.state.last_update_time = time.time()
 
     def _make_handler(self):
@@ -484,11 +699,14 @@ class WebDashboardNode(Node):
                             'height': state.image_height,
                             'jpeg_quality': state.jpeg_quality,
                         },
+                        'objects': dashboard_objects_to_dict(state.objects3d, state.objects_ik_json),
                         'objects2d': object2d_array_to_dict(state.objects2d),
                         'objects3d': object3d_array_to_dict(state.objects3d),
+                        'objects_ik': state.objects_ik_json or {'objects': [], 'message': 'no data'},
                         'target_point': point_stamped_to_dict(state.target_point),
                         'target_pose': pose_stamped_to_dict(state.target_pose),
                         'target_joint_state': joint_state_to_dict(state.target_joint_state),
+                        'current_joint_state': joint_state_to_dict(state.current_joint_state),
                     }
 
         return DashboardHandler
@@ -570,6 +788,52 @@ def object3d_array_to_dict(msg):
         'header': header_to_dict(msg.header),
         'objects': [object3d_to_dict(obj) for obj in msg.objects],
     }
+
+
+def dashboard_objects_to_dict(objects3d_msg, objects_ik_json):
+    if objects3d_msg is None:
+        return []
+
+    ik_by_id = {}
+    if isinstance(objects_ik_json, dict):
+        for item in objects_ik_json.get('objects', []):
+            object_id = item.get('object_id')
+            if object_id:
+                ik_by_id[object_id] = item
+
+    objects = []
+    for index, obj in enumerate(objects3d_msg.objects):
+        det = obj.detection
+        object_id = object_id_from_detection(index, det.class_name)
+        ik_item = ik_by_id.get(object_id, {})
+        target_point = point_to_dict(obj.point_target)
+        camera_point = point_to_dict(obj.point_camera)
+        item = {
+            'object_id': object_id,
+            'class_name': str(det.class_name),
+            'class_id': int(det.class_id),
+            'confidence': float(det.confidence),
+            'bbox_xyxy': [int(det.xmin), int(det.ymin), int(det.xmax), int(det.ymax)],
+            'center_px': [float(det.cx), float(det.cy)],
+            'valid_3d': bool(obj.valid),
+            'cached': bool(obj.cached),
+            'source_frame': str(obj.source_frame),
+            'target_frame': str(obj.target_frame),
+            'depth_m': float(obj.depth_m),
+            'point_camera': camera_point,
+            'point_target': target_point,
+            'point_cam_m': [camera_point['x'], camera_point['y'], camera_point['z']],
+            'point_torso_m': [target_point['x'], target_point['y'], target_point['z']] if obj.valid else None,
+            'message': str(obj.message),
+            'ik': ik_item.get('ik'),
+        }
+        objects.append(item)
+    return objects
+
+
+def object_id_from_detection(index, class_name):
+    safe = ''.join(ch if ch.isalnum() else '_' for ch in str(class_name).lower()).strip('_')
+    return '%02d_%s' % (int(index), safe or 'object')
 
 
 def point_stamped_to_dict(msg):

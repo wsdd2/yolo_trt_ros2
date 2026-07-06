@@ -8,6 +8,7 @@ yolo_detector:
     mobileclip_path: ''
     model_kind: auto
     class_names_path: ''
+    yoloe_classes_path: ''
     input_width: 640
     input_height: 640
     imgsz: 640

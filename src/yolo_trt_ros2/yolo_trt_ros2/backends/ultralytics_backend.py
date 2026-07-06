@@ -20,6 +20,7 @@ class UltralyticsBackend(object):
         prompt_free=False,
         best_handle_only=False,
         mobileclip_path='',
+        filter_prompt_free_handles=False,
     ):
         if not model_path:
             raise ValueError('model_path is required when backend=ultralytics/yolo/yoloe')
@@ -43,6 +44,7 @@ class UltralyticsBackend(object):
         self.prompt_free = bool(prompt_free)
         self.best_handle_only = bool(best_handle_only)
         self.mobileclip_path = str(mobileclip_path or '')
+        self.filter_prompt_free_handles = bool(filter_prompt_free_handles)
 
         if self.model_kind == 'yoloe':
             self._patch_mobileclip_asset()
@@ -117,7 +119,7 @@ class UltralyticsBackend(object):
             x2 = max(0, min(img_w - 1, x2))
             y2 = max(0, min(img_h - 1, y2))
 
-            if self.prompt_free and self.model_kind == 'yoloe':
+            if self.prompt_free and self.model_kind == 'yoloe' and self.filter_prompt_free_handles:
                 if not any(k in class_name.lower() for k in self.HANDLE_KEYWORDS):
                     continue
 

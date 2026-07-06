@@ -1,0 +1,10 @@
+# Copy this file to:
+#   Foxy_ROS/src/yolo_trt_ros2/config/private/yoloe_classes.txt
+#
+# One class/prompt per line, or comma-separated. Lines starting with # are ignored.
+# Keep the private file out of git; config/private/ is ignored by .gitignore.
+
+cabinet door handle
+push button
+selector knob
+control panel switch
