@@ -6,13 +6,13 @@
 
 ## 目标平台
 
-- 机器人：Unitree G1
+- 机器人：Unitree G1 / H2
 - 计算平台：NVIDIA Jetson Orin NX
-- 系统：Ubuntu 20.04
+- 系统：Ubuntu 20.04 / 22.04
 - ROS：ROS2 Foxy
 - 架构：aarch64 / arm64
 - JetPack / L4T：R35.3.1
-- CUDA：11.4
+- CUDA：<= 13.0
 - TensorRT：8.5.2
 
 ## 包结构
