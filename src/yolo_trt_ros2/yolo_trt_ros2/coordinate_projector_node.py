@@ -45,6 +45,23 @@ G1_H2_JOINT_INDEX = {
     'right_wrist_yaw_joint': 28,
 }
 
+H2_XR_DUAL_ARM_JOINTS = [
+    'left_shoulder_pitch_joint',
+    'left_shoulder_roll_joint',
+    'left_shoulder_yaw_joint',
+    'left_elbow_joint',
+    'left_wrist_roll_joint',
+    'left_wrist_pitch_joint',
+    'left_wrist_yaw_joint',
+    'right_shoulder_pitch_joint',
+    'right_shoulder_roll_joint',
+    'right_shoulder_yaw_joint',
+    'right_elbow_joint',
+    'right_wrist_roll_joint',
+    'right_wrist_pitch_joint',
+    'right_wrist_yaw_joint',
+]
+
 
 class UnitreeLowStateJointReader:
     """Tiny Unitree lowstate reader used only when eye-in-hand FK is enabled."""
@@ -112,6 +129,9 @@ class CoordinateProjectorNode(Node):
         self.joint_json_path = str(self.get_parameter('joint_json_path').value)
         self.lock_waist = bool(self.get_parameter('lock_waist').value)
         self.h2_ee_offset_xyz = self._get_float_list_parameter('h2_ee_offset_xyz', [0.05, 0.0, 0.0], 3)
+        self.fk_backend_requested = str(self.get_parameter('fk_backend').value).strip().lower()
+        self.fk_backend_active = 'none'
+        self.h2_xr_scripts_dir = str(self.get_parameter('h2_xr_scripts_dir').value)
         self.min_confidence = float(self.get_parameter('min_confidence').value)
         self.depth_radius = int(self.get_parameter('depth_radius').value)
         self.depth_scale = float(self.get_parameter('depth_scale').value)
@@ -151,6 +171,8 @@ class CoordinateProjectorNode(Node):
         self.handeye_transform = None
         self.T_cam2hand = None
         self._fk_model = None
+        self._xr_ik = None
+        self._xr_current_ee_poses = None
         self._ik_solver = None
         self._joint_reader = None
         self._fk_error = ''
@@ -177,6 +199,7 @@ class CoordinateProjectorNode(Node):
         self.create_subscription(Image, self.depth_topic, self._depth_callback, 10)
         self.create_subscription(CameraInfo, self.camera_info_topic, self._camera_info_callback, 10)
         self.create_subscription(Object2DArray, self.objects_topic, self._objects_callback, 10)
+        self.create_timer(0.1, self._current_joint_timer_callback)
 
         self.get_logger().info(
             'Coordinate projector started: objects=%s, depth=%s, camera_info=%s, target_frame=%s, handeye_mode=%s, handeye=%s'
@@ -216,6 +239,8 @@ class CoordinateProjectorNode(Node):
         self.declare_parameter('joint_json_path', '')
         self.declare_parameter('lock_waist', True)
         self.declare_parameter('h2_ee_offset_xyz', [0.05, 0.0, 0.0])
+        self.declare_parameter('fk_backend', 'auto')
+        self.declare_parameter('h2_xr_scripts_dir', '/home/unitree/H2_joint_cartesian/scripts')
         self.declare_parameter('class_filter', '')
         self.declare_parameter('min_confidence', 0.25)
         self.declare_parameter('depth_radius', 3)
@@ -303,34 +328,37 @@ class CoordinateProjectorNode(Node):
 
     def _configure_fk(self):
         urdf = self._resolve_urdf_path()
-        if not urdf.is_file():
+        if not urdf.is_file() and self.fk_backend_requested in ('auto', 'urdf'):
             self._fk_error = 'URDF does not exist: %s' % urdf
             self.get_logger().warn(self._fk_error)
-            return
+            if self.fk_backend_requested == 'urdf':
+                return
 
         try:
-            workspace = Path(os.path.expanduser(self.workspace_root))
-            robot_kinematics_dir = workspace / 'robot_kinematics'
-            joint_to_pose_dir = robot_kinematics_dir / 'joint_to_pose'
-            pose_to_joint_dir = robot_kinematics_dir / 'pose_to_joint'
-            for path in (robot_kinematics_dir, joint_to_pose_dir, pose_to_joint_dir):
-                text = str(path)
-                if text not in sys.path:
-                    sys.path.insert(0, text)
-            from fk_urdf import URDFFK
+            if urdf.is_file():
+                workspace = Path(os.path.expanduser(self.workspace_root))
+                robot_kinematics_dir = workspace / 'robot_kinematics'
+                joint_to_pose_dir = robot_kinematics_dir / 'joint_to_pose'
+                pose_to_joint_dir = robot_kinematics_dir / 'pose_to_joint'
+                for path in (robot_kinematics_dir, joint_to_pose_dir, pose_to_joint_dir):
+                    text = str(path)
+                    if text not in sys.path:
+                        sys.path.insert(0, text)
+                from fk_urdf import URDFFK
 
-            self._fk_model = URDFFK(str(urdf))
-            self.urdf_path = str(urdf)
+                self._fk_model = URDFFK(str(urdf))
+                self.urdf_path = str(urdf)
             self.base_link = self._default_base_link()
             self.hand_link = self._default_hand_link()
             self.get_logger().info(
-                'Eye-in-hand FK enabled: robot=%s, urdf=%s, base=%s, hand=%s'
-                % (self.robot_model, self.urdf_path, self.base_link, self.hand_link)
+                'Eye-in-hand FK enabled: robot=%s, backend=%s, urdf=%s, base=%s, hand=%s'
+                % (self.robot_model, self.fk_backend_requested, self.urdf_path or '<none>', self.base_link, self.hand_link)
             )
         except Exception as exc:
             self._fk_error = 'Failed to initialize FK: %s' % exc
             self.get_logger().warn(self._fk_error)
-            return
+            if self.fk_backend_requested == 'urdf':
+                return
 
         if self.publish_target_joint_state or self.publish_objects_ik_json:
             try:
@@ -369,6 +397,28 @@ class CoordinateProjectorNode(Node):
         except Exception as exc:
             self._fk_error = 'Failed to initialize Unitree lowstate reader: %s' % exc
             self.get_logger().warn(self._fk_error)
+
+    def _ensure_xr_fk(self):
+        if self._xr_ik is not None and self._xr_current_ee_poses is not None:
+            return
+        if self.base_link != 'pelvis':
+            raise RuntimeError('xr_pinocchio FK only supports base_link=pelvis')
+        candidates = [
+            Path(os.path.expanduser(self.h2_xr_scripts_dir)) if self.h2_xr_scripts_dir else None,
+            Path(os.path.expanduser(self.workspace_root)) / 'H2_joint_control' / 'H2_joint_cartesian' / 'scripts',
+            Path('/home/unitree/H2_joint_cartesian/scripts'),
+        ]
+        for candidate in candidates:
+            if candidate is None:
+                continue
+            text = str(candidate)
+            if text not in sys.path:
+                sys.path.insert(0, text)
+        from h2_xr_official_ik_demo import H2CompatibleIK, current_ee_poses
+
+        self._xr_ik = H2CompatibleIK()
+        self._xr_current_ee_poses = current_ee_poses
+        self.get_logger().info('xr_pinocchio FK initialized from %s' % (self.h2_xr_scripts_dir or '<auto>'))
 
     def _resolve_handeye_input(self, path):
         resolved = Path(os.path.expanduser(path))
@@ -652,7 +702,7 @@ class CoordinateProjectorNode(Node):
         return (transform @ point_h)[:3]
 
     def _transform_eye_in_hand(self, point_camera):
-        if self.T_cam2hand is None or self._fk_model is None:
+        if self.T_cam2hand is None:
             return None
         joints = self._current_joint_values()
         if not joints:
@@ -689,6 +739,36 @@ class CoordinateProjectorNode(Node):
         return self._joint_reader.joint_positions_by_name()
 
     def _compute_base_to_hand(self, joint_values):
+        backend = self.fk_backend_requested or 'auto'
+        if backend in ('auto', 'xr_pinocchio'):
+            try:
+                return self._compute_base_to_hand_xr(joint_values)
+            except Exception as exc:
+                self._fk_error = 'xr_pinocchio failed: %s' % exc
+                if backend == 'xr_pinocchio':
+                    raise
+        if backend in ('auto', 'urdf'):
+            return self._compute_base_to_hand_urdf(joint_values)
+        raise RuntimeError('Unknown FK backend: %s' % backend)
+
+    def _compute_base_to_hand_xr(self, joint_values):
+        self._ensure_xr_fk()
+        q = np.asarray(
+            [float(joint_values.get(name, 0.0)) for name in H2_XR_DUAL_ARM_JOINTS],
+            dtype=np.float64,
+        )
+        left_pose, right_pose = self._xr_current_ee_poses(self._xr_ik, q)
+        pose = left_pose if self.hand_link.startswith('left_') else right_pose
+        transform = np.eye(4, dtype=np.float64)
+        transform[:3, :3] = np.asarray(pose.rotation, dtype=np.float64)
+        transform[:3, 3] = np.asarray(pose.translation, dtype=np.float64).reshape(3)
+        self.fk_backend_active = 'xr_pinocchio'
+        self._fk_error = ''
+        return transform
+
+    def _compute_base_to_hand_urdf(self, joint_values):
+        if self._fk_model is None:
+            raise RuntimeError('URDF FK model is not initialized')
         targets = [self.hand_link]
         poses = self._fk_model.compute_link_poses(
             joint_values=self._lock_joint_values(joint_values),
@@ -702,6 +782,8 @@ class CoordinateProjectorNode(Node):
             offset = np.asarray(self.h2_ee_offset_xyz, dtype=np.float64).reshape(3)
             transform = transform.copy()
             transform[:3, 3] = transform[:3, 3] + transform[:3, :3] @ offset
+        self.fk_backend_active = 'urdf'
+        self._fk_error = ''
         return transform
 
     def _lock_joint_values(self, joint_values):
@@ -728,6 +810,20 @@ class CoordinateProjectorNode(Node):
             return
         msg = JointState()
         msg.header.stamp = header.stamp
+        msg.header.frame_id = self.base_link or self._default_base_link()
+        names = sorted(joints.keys())
+        msg.name = names
+        msg.position = [float(joints[name]) for name in names]
+        self.current_joint_state_pub.publish(msg)
+
+    def _current_joint_timer_callback(self):
+        if not self.publish_current_joint_state:
+            return
+        joints = self._current_joint_values()
+        if not joints:
+            return
+        msg = JointState()
+        msg.header.stamp = self.get_clock().now().to_msg()
         msg.header.frame_id = self.base_link or self._default_base_link()
         names = sorted(joints.keys())
         msg.name = names

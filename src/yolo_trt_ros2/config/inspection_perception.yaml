@@ -1,3 +1,23 @@
+direct_realsense:
+  ros__parameters:
+    workspace_root: /home/unitree/MscapeTech
+    color_topic: /camera/color/image_raw
+    depth_topic: /camera/aligned_depth_to_color/image_raw
+    camera_info_topic: /camera/color/camera_info
+    color_frame_id: camera_color_optical_frame
+    depth_frame_id: camera_color_optical_frame
+    width: 1280
+    height: 720
+    fps: 30
+    depth_width: 640
+    depth_height: 480
+    depth_fps: 30
+    cam_index: 0
+    cam_serial: ''
+    frame_timeout_ms: 1000
+    publish_period_sec: 0.033
+    restart_on_timeout_count: 30
+
 yolo_detector:
   ros__parameters:
     image_topic: /camera/color/image_raw
@@ -38,11 +58,11 @@ coordinate_projector:
     target_frame: ''
     handeye_mode: eye-in-hand
     handeye_npy_path: /home/unitree/MscapeTech/Hand_Eye_Calib/outputs/eye_in_hand_20260630_150210.json
-    handeye_target_frame: torso_link
+    handeye_target_frame: pelvis
     robot_model: h2
     workspace_root: /home/unitree/MscapeTech
-    urdf_path: /home/unitree/MscapeTech/unitree_ros/robots/h2_description/H2.urdf
-    base_link: torso_link
+    urdf_path: /home/unitree/H2_joint_cartesian/third_party/xr_teleoperate/assets/h2/H2.urdf
+    base_link: pelvis
     hand_link: right_wrist_yaw_link
     camera_link: ''
     network_interface: eth0
@@ -50,6 +70,8 @@ coordinate_projector:
     lowstate_topic: rt/lf/lowstate
     joint_json_path: ''
     lock_waist: true
+    fk_backend: auto
+    h2_xr_scripts_dir: /home/unitree/H2_joint_cartesian/scripts
     h2_ee_offset_xyz: [0.05, 0.0, 0.0]
     class_filter: ''
     min_confidence: 0.25
@@ -83,6 +105,7 @@ web_dashboard:
   ros__parameters:
     web_host: '0.0.0.0'
     web_port: 8080
+    public_host: '192.168.25.189'
     jpeg_quality: 80
     frame_timeout_sec: 2.0
     debug_image_topic: /detector/debug_image

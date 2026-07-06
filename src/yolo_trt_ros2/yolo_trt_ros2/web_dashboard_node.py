@@ -5,6 +5,7 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import cv2
+import numpy as np
 import rclpy
 from cv_bridge import CvBridge
 from geometry_msgs.msg import PointStamped, PoseStamped
@@ -118,6 +119,22 @@ INDEX_HTML = """<!doctype html>
       inset: 0;
       pointer-events: none;
     }
+    #warning {
+      position: absolute;
+      left: 14px;
+      top: 14px;
+      right: 14px;
+      z-index: 12;
+      display: none;
+      padding: 10px 12px;
+      border: 1px solid var(--warn);
+      border-radius: 6px;
+      background: rgba(13,17,21,.9);
+      color: var(--warn);
+      white-space: pre-wrap;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      pointer-events: none;
+    }
     .bbox {
       position: absolute;
       border: 2px solid var(--ok);
@@ -217,6 +234,7 @@ INDEX_HTML = """<!doctype html>
       <div id="preview" class="preview">
         <img id="stream" class="video" src="/stream.mjpg" alt="debug image stream">
         <div id="overlay"></div>
+        <div id="warning"></div>
       </div>
     </section>
     <div class="side">
@@ -330,7 +348,16 @@ INDEX_HTML = """<!doctype html>
     function renderOverlay(data) {
       const overlay = document.getElementById("overlay");
       const stream = document.getElementById("stream");
+      const warning = document.getElementById("warning");
       overlay.innerHTML = "";
+      const diagnostics = data.diagnostics || [];
+      if (diagnostics.length) {
+        warning.style.display = "block";
+        warning.textContent = diagnostics.join("\\n");
+      } else {
+        warning.style.display = "none";
+        warning.textContent = "";
+      }
       const objects = (data.objects || []).filter(o => o && o.bbox_xyxy);
       updateTracks(objects);
       const info = data.image || {};
@@ -493,11 +520,34 @@ INDEX_HTML = """<!doctype html>
 """
 
 
+def make_status_jpeg(message, width=1280, height=720):
+    image = np.zeros((int(height), int(width), 3), dtype=np.uint8)
+    image[:] = (5, 7, 8)
+    lines = [line for part in str(message).split('\n') for line in _wrap_text(part, 72)]
+    y = 70
+    cv2.putText(image, 'Inspection Perception Dashboard', (36, 34), cv2.FONT_HERSHEY_SIMPLEX, 0.85, (230, 237, 243), 2, cv2.LINE_AA)
+    for line in lines:
+        cv2.putText(image, line, (36, y), cv2.FONT_HERSHEY_SIMPLEX, 0.62, (80, 210, 255), 2, cv2.LINE_AA)
+        y += 34
+    ok, encoded = cv2.imencode('.jpg', image, [int(cv2.IMWRITE_JPEG_QUALITY), 82])
+    return encoded.tobytes() if ok else None
+
+
+def _wrap_text(text, max_chars):
+    text = str(text)
+    if not text:
+        return ['']
+    return [text[i:i + max_chars] for i in range(0, len(text), max_chars)]
+
+
 class DashboardState:
     def __init__(self):
         self.lock = threading.Lock()
         self.frame_condition = threading.Condition(self.lock)
-        self.jpeg = None
+        self.jpeg = make_status_jpeg(
+            'Waiting for ROS image topic: /detector/debug_image\n'
+            'If this stays here, check camera publisher and yolo_detector_node logs.'
+        )
         self.image_header = None
         self.image_width = 0
         self.image_height = 0
@@ -521,6 +571,7 @@ class WebDashboardNode(Node):
 
         self.host = str(self.get_parameter('web_host').value)
         self.port = int(self.get_parameter('web_port').value)
+        self.public_host = str(self.get_parameter('public_host').value)
         self.jpeg_quality = int(self.get_parameter('jpeg_quality').value)
         self.frame_timeout_sec = float(self.get_parameter('frame_timeout_sec').value)
         self.debug_image_topic = self.get_parameter('debug_image_topic').value
@@ -553,12 +604,13 @@ class WebDashboardNode(Node):
 
         self.get_logger().info(
             'Web dashboard started: http://%s:%d/ image=%s objects=%s objects_3d=%s'
-            % (self.host if self.host != '0.0.0.0' else '<H2-IP>', self.port, self.debug_image_topic, self.objects_topic, self.objects_3d_topic)
+            % (self.public_host or self.host, self.port, self.debug_image_topic, self.objects_topic, self.objects_3d_topic)
         )
 
     def _declare_parameters(self):
         self.declare_parameter('web_host', '0.0.0.0')
         self.declare_parameter('web_port', 8080)
+        self.declare_parameter('public_host', '192.168.25.189')
         self.declare_parameter('jpeg_quality', 80)
         self.declare_parameter('frame_timeout_sec', 2.0)
         self.declare_parameter('debug_image_topic', '/detector/debug_image')
@@ -693,6 +745,7 @@ class WebDashboardNode(Node):
                     return {
                         'server_time': time.time(),
                         'last_update_time': state.last_update_time,
+                        'diagnostics': dashboard_diagnostics(state, time.time()),
                         'image': {
                             'header': header_to_dict(state.image_header),
                             'width': state.image_width,
@@ -788,6 +841,28 @@ def object3d_array_to_dict(msg):
         'header': header_to_dict(msg.header),
         'objects': [object3d_to_dict(obj) for obj in msg.objects],
     }
+
+
+def dashboard_diagnostics(state, now):
+    warnings = []
+    if state.image_header is None:
+        warnings.append(
+            'WARN: no /detector/debug_image received yet. '
+            'Check /camera/color/image_raw, yolo_detector_node, and detector backend logs.'
+        )
+    if state.objects2d is None:
+        warnings.append('WARN: no /detector/objects received yet.')
+    if state.objects3d is None:
+        warnings.append('WARN: no /detector/objects_3d received yet. Check depth image and CameraInfo.')
+    if state.current_joint_state is None:
+        warnings.append('WARN: no /detector/current_joint_state received yet. Check Unitree lowstate topic/interface.')
+    if state.last_update_time <= 0.0:
+        warnings.append('WARN: dashboard has not received any subscribed ROS message.')
+    else:
+        age = float(now) - float(state.last_update_time)
+        if age > 5.0:
+            warnings.append('WARN: last dashboard update is %.1fs old; ROS topics may be stalled.' % age)
+    return warnings
 
 
 def dashboard_objects_to_dict(objects3d_msg, objects_ik_json):

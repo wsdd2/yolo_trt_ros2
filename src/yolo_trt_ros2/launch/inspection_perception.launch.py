@@ -1,5 +1,6 @@
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
+from launch.conditions import IfCondition
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 from ament_index_python.packages import get_package_share_directory
@@ -15,6 +16,20 @@ def generate_launch_description():
         'config_file',
         default_value=default_config,
         description='Path to detector and coordinate projector parameter YAML file.',
+    )
+    use_direct_camera_arg = DeclareLaunchArgument(
+        'use_direct_camera',
+        default_value='true',
+        description='Start direct RealSense RGB-D publisher inside this launch.',
+    )
+
+    direct_camera_node = Node(
+        package='yolo_trt_ros2',
+        executable='direct_realsense_node',
+        name='direct_realsense',
+        output='screen',
+        parameters=[LaunchConfiguration('config_file')],
+        condition=IfCondition(LaunchConfiguration('use_direct_camera')),
     )
 
     detector_node = Node(
@@ -43,6 +58,8 @@ def generate_launch_description():
 
     return LaunchDescription([
         config_arg,
+        use_direct_camera_arg,
+        direct_camera_node,
         detector_node,
         coordinate_node,
         web_dashboard_node,

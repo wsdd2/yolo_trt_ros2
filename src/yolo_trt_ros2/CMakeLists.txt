@@ -7,6 +7,7 @@ find_package(ament_cmake_python REQUIRED)
 ament_python_install_package(${PROJECT_NAME})
 
 install(PROGRAMS
+  yolo_trt_ros2/direct_realsense_node.py
   yolo_trt_ros2/yolo_detector_node.py
   yolo_trt_ros2/coordinate_projector_node.py
   yolo_trt_ros2/benchmark_topics_node.py
