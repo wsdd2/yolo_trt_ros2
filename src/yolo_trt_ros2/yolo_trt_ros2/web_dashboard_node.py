@@ -13,7 +13,7 @@ from rclpy.node import Node
 from sensor_msgs.msg import Image, JointState
 from std_msgs.msg import String
 
-from detector_msgs.msg import Object2DArray, Object3DArray
+from detector_msgs.msg import Object2DArray, Object3DArray, RobotInspectionStatus
 
 
 INDEX_HTML = """<!doctype html>
@@ -560,6 +560,7 @@ class DashboardState:
         self.target_joint_state = None
         self.current_joint_state = None
         self.objects_ik_json = None
+        self.robot_status = None
 
 
 class WebDashboardNode(Node):
@@ -582,6 +583,7 @@ class WebDashboardNode(Node):
         self.target_joint_state_topic = self.get_parameter('target_joint_state_topic').value
         self.current_joint_state_topic = self.get_parameter('current_joint_state_topic').value
         self.objects_ik_topic = self.get_parameter('objects_ik_topic').value
+        self.robot_status_topic = self.get_parameter('robot_status_topic').value
 
         self.bridge = CvBridge()
         self.state = DashboardState()
@@ -595,6 +597,7 @@ class WebDashboardNode(Node):
         self.create_subscription(JointState, self.target_joint_state_topic, self._joint_state_callback, 10)
         self.create_subscription(JointState, self.current_joint_state_topic, self._current_joint_state_callback, 10)
         self.create_subscription(String, self.objects_ik_topic, self._objects_ik_callback, 10)
+        self.create_subscription(RobotInspectionStatus, self.robot_status_topic, self._robot_status_callback, 10)
 
         handler_cls = self._make_handler()
         self.server = ThreadingHTTPServer((self.host, self.port), handler_cls)
@@ -621,6 +624,7 @@ class WebDashboardNode(Node):
         self.declare_parameter('target_joint_state_topic', '/detector/target_joint_state')
         self.declare_parameter('current_joint_state_topic', '/detector/current_joint_state')
         self.declare_parameter('objects_ik_topic', '/detector/objects_ik_json')
+        self.declare_parameter('robot_status_topic', '/robot/inspection_status')
 
     def _image_callback(self, msg):
         try:
@@ -679,6 +683,11 @@ class WebDashboardNode(Node):
             return
         with self.state.lock:
             self.state.objects_ik_json = payload
+            self.state.last_update_time = time.time()
+
+    def _robot_status_callback(self, msg):
+        with self.state.lock:
+            self.state.robot_status = msg
             self.state.last_update_time = time.time()
 
     def _make_handler(self):
@@ -756,6 +765,7 @@ class WebDashboardNode(Node):
                         'objects2d': object2d_array_to_dict(state.objects2d),
                         'objects3d': object3d_array_to_dict(state.objects3d),
                         'objects_ik': state.objects_ik_json or {'objects': [], 'message': 'no data'},
+                        'robot_status': robot_status_to_dict(state.robot_status),
                         'target_point': point_stamped_to_dict(state.target_point),
                         'target_pose': pose_stamped_to_dict(state.target_pose),
                         'target_joint_state': joint_state_to_dict(state.target_joint_state),
@@ -944,6 +954,42 @@ def joint_state_to_dict(msg):
         'position': [float(value) for value in msg.position],
         'velocity': [float(value) for value in msg.velocity],
         'effort': [float(value) for value in msg.effort],
+    }
+
+
+def robot_status_to_dict(msg):
+    if msg is None:
+        return {
+            'available': False,
+            'header': None,
+            'stage_id': 0,
+            'stage_name': '',
+            'current_action': '',
+            'motion_active': False,
+            'progress': 0.0,
+            'has_error': False,
+            'error_code': '',
+            'error_message': '',
+            'emergency_stop': False,
+            'target_reachable': False,
+            'reachability_message': 'no /robot/inspection_status received',
+            'target_id': '',
+        }
+    return {
+        'available': True,
+        'header': header_to_dict(msg.header),
+        'stage_id': int(msg.stage_id),
+        'stage_name': str(msg.stage_name),
+        'current_action': str(msg.current_action),
+        'motion_active': bool(msg.motion_active),
+        'progress': float(msg.progress),
+        'has_error': bool(msg.has_error),
+        'error_code': str(msg.error_code),
+        'error_message': str(msg.error_message),
+        'emergency_stop': bool(msg.emergency_stop),
+        'target_reachable': bool(msg.target_reachable),
+        'reachability_message': str(msg.reachability_message),
+        'target_id': str(msg.target_id),
     }
 
 

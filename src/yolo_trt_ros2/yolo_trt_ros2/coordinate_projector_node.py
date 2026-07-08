@@ -21,7 +21,7 @@ try:
 except ImportError:  # pragma: no cover - tf2_ros is provided by ROS.
     tf2_ros = None
 
-from detector_msgs.msg import Object3D, Object3DArray
+from detector_msgs.msg import Object3D, Object3DArray, RobotInspectionStatus
 from detector_msgs.msg import Object2DArray
 
 
@@ -113,6 +113,7 @@ class CoordinateProjectorNode(Node):
         self.target_joint_state_topic = self.get_parameter('target_joint_state_topic').value
         self.current_joint_state_topic = self.get_parameter('current_joint_state_topic').value
         self.objects_ik_topic = self.get_parameter('objects_ik_topic').value
+        self.robot_status_topic = self.get_parameter('robot_status_topic').value
         self.target_frame = str(self.get_parameter('target_frame').value)
         self.handeye_npy_path = str(self.get_parameter('handeye_npy_path').value)
         self.handeye_mode = str(self.get_parameter('handeye_mode').value).strip().lower().replace('_', '-')
@@ -178,6 +179,7 @@ class CoordinateProjectorNode(Node):
         self._fk_error = ''
         self._ik_error = ''
         self._last_ik_warning_sec = 0.0
+        self.latest_robot_status = None
         self._configure_handeye_and_fk()
 
         self.tf_buffer = None
@@ -199,6 +201,7 @@ class CoordinateProjectorNode(Node):
         self.create_subscription(Image, self.depth_topic, self._depth_callback, 10)
         self.create_subscription(CameraInfo, self.camera_info_topic, self._camera_info_callback, 10)
         self.create_subscription(Object2DArray, self.objects_topic, self._objects_callback, 10)
+        self.create_subscription(RobotInspectionStatus, self.robot_status_topic, self._robot_status_callback, 10)
         self.create_timer(0.1, self._current_joint_timer_callback)
 
         self.get_logger().info(
@@ -223,6 +226,7 @@ class CoordinateProjectorNode(Node):
         self.declare_parameter('target_joint_state_topic', '/detector/target_joint_state')
         self.declare_parameter('current_joint_state_topic', '/detector/current_joint_state')
         self.declare_parameter('objects_ik_topic', '/detector/objects_ik_json')
+        self.declare_parameter('robot_status_topic', '/robot/inspection_status')
         self.declare_parameter('target_frame', '')
         self.declare_parameter('handeye_npy_path', '')
         self.declare_parameter('handeye_mode', 'eye-to-hand')
@@ -505,6 +509,9 @@ class CoordinateProjectorNode(Node):
 
     def _camera_info_callback(self, camera_info):
         self.latest_camera_info = camera_info
+
+    def _robot_status_callback(self, msg):
+        self.latest_robot_status = msg
 
     def _objects_callback(self, objects_msg):
         out_msg = Object3DArray()
@@ -845,6 +852,7 @@ class CoordinateProjectorNode(Node):
             'base_link': self.base_link or self._default_base_link(),
             'target_link': self.ik_target_link or self.hand_link or self._default_hand_link(),
             'current_joint_values_rad': {str(k): float(v) for k, v in (joints or {}).items()},
+            'robot_status': self._robot_status_payload(self.latest_robot_status),
             'objects': [],
             'message': 'ok',
         }
@@ -910,6 +918,46 @@ class CoordinateProjectorNode(Node):
         msg = String()
         msg.data = json.dumps(payload, ensure_ascii=False)
         publisher.publish(msg)
+
+    def _robot_status_payload(self, msg):
+        if msg is None:
+            return {
+                'available': False,
+                'stage_id': 0,
+                'stage_name': '',
+                'current_action': '',
+                'motion_active': False,
+                'progress': 0.0,
+                'has_error': False,
+                'error_code': '',
+                'error_message': '',
+                'emergency_stop': False,
+                'target_reachable': False,
+                'reachability_message': 'no /robot/inspection_status received',
+                'target_id': '',
+            }
+        return {
+            'available': True,
+            'header': {
+                'stamp': {
+                    'sec': int(msg.header.stamp.sec),
+                    'nanosec': int(msg.header.stamp.nanosec),
+                },
+                'frame_id': str(msg.header.frame_id),
+            },
+            'stage_id': int(msg.stage_id),
+            'stage_name': str(msg.stage_name),
+            'current_action': str(msg.current_action),
+            'motion_active': bool(msg.motion_active),
+            'progress': float(msg.progress),
+            'has_error': bool(msg.has_error),
+            'error_code': str(msg.error_code),
+            'error_message': str(msg.error_message),
+            'emergency_stop': bool(msg.emergency_stop),
+            'target_reachable': bool(msg.target_reachable),
+            'reachability_message': str(msg.reachability_message),
+            'target_id': str(msg.target_id),
+        }
 
     def _solve_object_ik(self, object_3d, joints):
         target_pose = self._ik_target_pose_matrix(object_3d.point_target)

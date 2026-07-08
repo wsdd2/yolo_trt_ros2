@@ -55,6 +55,7 @@ coordinate_projector:
     target_joint_state_topic: /detector/target_joint_state
     current_joint_state_topic: /detector/current_joint_state
     objects_ik_topic: /detector/objects_ik_json
+    robot_status_topic: /robot/inspection_status
     target_frame: ''
     handeye_mode: eye-in-hand
     handeye_npy_path: /home/unitree/MscapeTech/Hand_Eye_Calib/outputs/eye_in_hand_20260630_150210.json
@@ -116,3 +117,4 @@ web_dashboard:
     target_joint_state_topic: /detector/target_joint_state
     current_joint_state_topic: /detector/current_joint_state
     objects_ik_topic: /detector/objects_ik_json
+    robot_status_topic: /robot/inspection_status

@@ -389,7 +389,104 @@ ree_target_for_dex1_tip_m  为了让 Dex1 指尖戳到该点，R_ee 应到达的
 preferred_copy_target_m    推荐给运控/键盘控制直接使用的目标
 ```
 
-## 11. 直连脚本备用启动
+## 11. 机器人端发布巡检状态
+
+机器人/运控端可以发布：
+
+```text
+/robot/inspection_status
+```
+
+消息类型：
+
+```text
+detector_msgs/msg/RobotInspectionStatus
+```
+
+视觉侧会订阅这个 topic，并把状态带进：
+
+```text
+/detector/objects_ik_json
+Web dashboard /api/state 的 robot_status 字段
+```
+
+推荐 stage 约定：
+
+```text
+0 idle/unknown
+1 move_to_handle_front
+2 press_blue_point
+3 grasp_or_pull_handle
+4 door_opened
+5 recover_or_abort
+```
+
+Python 发布片段：
+
+```python
+from detector_msgs.msg import RobotInspectionStatus
+
+pub = node.create_publisher(RobotInspectionStatus, "/robot/inspection_status", 10)
+
+msg = RobotInspectionStatus()
+msg.header.stamp = node.get_clock().now().to_msg()
+msg.header.frame_id = "pelvis"
+msg.stage_id = 2
+msg.stage_name = "press_blue_point"
+msg.current_action = "moving_to_blue_button"
+msg.motion_active = True
+msg.progress = 0.45
+msg.has_error = False
+msg.error_code = ""
+msg.error_message = ""
+msg.emergency_stop = False
+msg.target_reachable = True
+msg.reachability_message = "ik ok"
+msg.target_id = "01_blue_push_point"
+pub.publish(msg)
+```
+
+命令行临时发布示例：
+
+```bash
+ros2 topic pub --once /robot/inspection_status detector_msgs/msg/RobotInspectionStatus "{
+  header: {frame_id: 'pelvis'},
+  stage_id: 2,
+  stage_name: 'press_blue_point',
+  current_action: 'moving_to_blue_button',
+  motion_active: true,
+  progress: 0.45,
+  has_error: false,
+  error_code: '',
+  error_message: '',
+  emergency_stop: false,
+  target_reachable: true,
+  reachability_message: 'ik ok',
+  target_id: '01_blue_push_point'
+}"
+```
+
+如果目标不可达：
+
+```bash
+ros2 topic pub --once /robot/inspection_status detector_msgs/msg/RobotInspectionStatus "{
+  header: {frame_id: 'pelvis'},
+  stage_id: 3,
+  stage_name: 'grasp_or_pull_handle',
+  current_action: 'planning_failed',
+  motion_active: false,
+  progress: 0.0,
+  has_error: true,
+  error_code: 'IK_UNREACHABLE',
+  error_message: 'target outside reachable workspace',
+  emergency_stop: false,
+  target_reachable: false,
+  reachability_message: 'ik rejected',
+  target_id: '00_black_cabinet_door_handle'
+}"
+```
+
+## 12. 直连脚本备用启动
 
 当 ROS 相机链路不稳时，直连脚本仍可用。它运行在 `h1_arm` conda 环境：
 
@@ -434,4 +531,3 @@ Dex1-1 当前现场标定：
 ```
 
 这个偏移只作用于蓝点目标，不改变所有物体的 Dex1 TCP。
-
