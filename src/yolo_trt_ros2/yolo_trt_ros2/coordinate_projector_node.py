@@ -4,7 +4,61 @@ import math
 import os
 import sys
 import time
+import ctypes
 from pathlib import Path
+
+
+def _bootstrap_h2_python_paths():
+    # H2 daily launch runs from system Python. Keep these paths local to this
+    # node so console-script metadata issues and stripped PYTHONPATH do not
+    # break rclpy or Unitree SDK imports.
+    for path in (
+        '/opt/ros/humble/local/lib/python3.10/dist-packages',
+        '/opt/ros/humble/lib/python3.10/site-packages',
+        '/home/unitree/MscapeTech/Foxy_ROS/install/detector_msgs/local/lib/python3.10/dist-packages',
+        '/home/unitree/MscapeTech/Foxy_ROS/install/detector_msgs/lib/python3.10/site-packages',
+        '/home/unitree/MscapeTech/unitree_sdk2_python',
+    ):
+        if os.path.isdir(path) and path not in sys.path:
+            sys.path.insert(0, path)
+
+    ros_lib_dirs = []
+    ros_lib_root = '/opt/ros/humble/lib'
+    if os.path.isdir(ros_lib_root):
+        ros_lib_dirs.append(ros_lib_root)
+        for root, _dirs, files in os.walk(ros_lib_root):
+            if 'librcl_action.so' in files and root not in ros_lib_dirs:
+                ros_lib_dirs.append(root)
+
+    old_ld_library_path = os.environ.get('LD_LIBRARY_PATH', '')
+    old_ld_parts = [part for part in old_ld_library_path.split(':') if part]
+    missing_ld_dirs = [path for path in ros_lib_dirs if path not in old_ld_parts]
+    if missing_ld_dirs:
+        os.environ['LD_LIBRARY_PATH'] = ':'.join(missing_ld_dirs + old_ld_parts)
+        # The dynamic loader reads LD_LIBRARY_PATH at process startup. If this
+        # process was spawned with a stripped environment, restart once so
+        # rclpy's C extension can resolve librcl_action.so and friends.
+        if os.environ.get('YOLO_TRT_ROS2_LD_BOOTSTRAPPED') != '1':
+            os.environ['YOLO_TRT_ROS2_LD_BOOTSTRAPPED'] = '1'
+            os.execv(sys.executable, [sys.executable] + sys.argv)
+
+    for library in (
+        'librcl_action.so',
+        'librcl.so',
+        'librmw.so',
+        'librcutils.so',
+    ):
+        for directory in ros_lib_dirs:
+            path = os.path.join(directory, library)
+            if os.path.isfile(path):
+                try:
+                    ctypes.CDLL(path, mode=ctypes.RTLD_GLOBAL)
+                    break
+                except OSError:
+                    pass
+
+
+_bootstrap_h2_python_paths()
 
 import numpy as np
 import rclpy

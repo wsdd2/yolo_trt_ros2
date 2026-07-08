@@ -1,7 +1,7 @@
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument
+from launch.actions import DeclareLaunchArgument, ExecuteProcess
 from launch.conditions import IfCondition
-from launch.substitutions import LaunchConfiguration
+from launch.substitutions import EnvironmentVariable, LaunchConfiguration
 from launch_ros.actions import Node
 from ament_index_python.packages import get_package_share_directory
 
@@ -40,12 +40,26 @@ def generate_launch_description():
         parameters=[LaunchConfiguration('config_file')],
     )
 
-    coordinate_node = Node(
-        package='yolo_trt_ros2',
-        executable='coordinate_projector_node',
-        name='coordinate_projector',
+    # Use `python3 -m` for coordinate_projector to avoid setuptools console-script
+    # metadata failures observed on the H2 system Python environment.
+    coordinate_node = ExecuteProcess(
+        cmd=[
+            '/usr/bin/python3',
+            '-m',
+            'yolo_trt_ros2.coordinate_projector_node',
+            '--ros-args',
+            '-r',
+            '__node:=coordinate_projector',
+            '--params-file',
+            LaunchConfiguration('config_file'),
+        ],
+        additional_env={
+            'LD_LIBRARY_PATH': [
+                '/opt/ros/humble/lib:',
+                EnvironmentVariable('LD_LIBRARY_PATH', default_value=''),
+            ],
+        },
         output='screen',
-        parameters=[LaunchConfiguration('config_file')],
     )
 
     web_dashboard_node = Node(
