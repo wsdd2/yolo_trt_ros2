@@ -61,6 +61,7 @@ def _bootstrap_h2_python_paths():
 _bootstrap_h2_python_paths()
 
 import numpy as np
+import cv2
 import rclpy
 from cv_bridge import CvBridge
 from geometry_msgs.msg import Point, PointStamped, PoseStamped
@@ -183,12 +184,33 @@ class CoordinateProjectorNode(Node):
         self.lowstate_topic = str(self.get_parameter('lowstate_topic').value)
         self.joint_json_path = str(self.get_parameter('joint_json_path').value)
         self.lock_waist = bool(self.get_parameter('lock_waist').value)
-        self.h2_ee_offset_xyz = self._get_float_list_parameter('h2_ee_offset_xyz', [0.05, 0.0, 0.0], 3)
+        self.handeye_mount_offset_from_wrist_xyz = self._get_float_list_parameter(
+            'handeye_mount_offset_from_wrist_xyz',
+            [0.0, 0.0, 0.0],
+            3,
+        )
+        self.dex1_tip_from_wrist_xyz = self._get_float_list_parameter('dex1_tip_from_wrist_xyz', [0.05, 0.0, 0.0], 3)
+        self.blue_point_target_world_offset_xyz = self._get_float_list_parameter(
+            'blue_point_target_world_offset_xyz',
+            [0.0, 0.0, 0.0],
+            3,
+        )
         self.fk_backend_requested = str(self.get_parameter('fk_backend').value).strip().lower()
         self.fk_backend_active = 'none'
         self.h2_xr_scripts_dir = str(self.get_parameter('h2_xr_scripts_dir').value)
         self.min_confidence = float(self.get_parameter('min_confidence').value)
         self.depth_radius = int(self.get_parameter('depth_radius').value)
+        self.depth_fallback = str(self.get_parameter('depth_fallback').value).strip().lower()
+        self.depth_roi_scale = float(self.get_parameter('depth_roi_scale').value)
+        self.depth_expanded_roi_scale = float(self.get_parameter('depth_expanded_roi_scale').value)
+        self.handle_depth_grasp_fallback = bool(self.get_parameter('handle_depth_grasp_fallback').value)
+        self.handle_depth_search_left_px = int(self.get_parameter('handle_depth_search_left_px').value)
+        self.handle_depth_search_right_px = int(self.get_parameter('handle_depth_search_right_px').value)
+        self.handle_depth_search_y_px = int(self.get_parameter('handle_depth_search_y_px').value)
+        self.handle_depth_near_delta_m = float(self.get_parameter('handle_depth_near_delta_m').value)
+        self.handle_depth_max_blue_distance_px = float(self.get_parameter('handle_depth_max_blue_distance_px').value)
+        self.handle_depth_sticky_px = float(self.get_parameter('handle_depth_sticky_px').value)
+        self.handle_mid_right_offset_m = float(self.get_parameter('handle_mid_right_offset_m').value)
         self.depth_scale = float(self.get_parameter('depth_scale').value)
         self.min_depth_m = float(self.get_parameter('min_depth_m').value)
         self.max_depth_m = float(self.get_parameter('max_depth_m').value)
@@ -233,6 +255,7 @@ class CoordinateProjectorNode(Node):
         self._fk_error = ''
         self._ik_error = ''
         self._last_ik_warning_sec = 0.0
+        self._last_depth_handle_grasp = None
         self.latest_robot_status = None
         self._configure_handeye_and_fk()
 
@@ -296,12 +319,25 @@ class CoordinateProjectorNode(Node):
         self.declare_parameter('lowstate_topic', 'rt/lowstate')
         self.declare_parameter('joint_json_path', '')
         self.declare_parameter('lock_waist', True)
-        self.declare_parameter('h2_ee_offset_xyz', [0.05, 0.0, 0.0])
+        self.declare_parameter('handeye_mount_offset_from_wrist_xyz', [0.0, 0.0, 0.0])
+        self.declare_parameter('dex1_tip_from_wrist_xyz', [0.05, 0.0, 0.0])
+        self.declare_parameter('blue_point_target_world_offset_xyz', [0.0, 0.0, 0.0])
         self.declare_parameter('fk_backend', 'auto')
         self.declare_parameter('h2_xr_scripts_dir', '/home/unitree/H2_joint_cartesian/scripts')
         self.declare_parameter('class_filter', '')
         self.declare_parameter('min_confidence', 0.25)
         self.declare_parameter('depth_radius', 3)
+        self.declare_parameter('depth_fallback', 'bbox')
+        self.declare_parameter('depth_roi_scale', 0.55)
+        self.declare_parameter('depth_expanded_roi_scale', 1.8)
+        self.declare_parameter('handle_depth_grasp_fallback', True)
+        self.declare_parameter('handle_depth_search_left_px', 360)
+        self.declare_parameter('handle_depth_search_right_px', 18)
+        self.declare_parameter('handle_depth_search_y_px', 70)
+        self.declare_parameter('handle_depth_near_delta_m', 0.015)
+        self.declare_parameter('handle_depth_max_blue_distance_px', 180.0)
+        self.declare_parameter('handle_depth_sticky_px', 45.0)
+        self.declare_parameter('handle_mid_right_offset_m', 0.01)
         self.declare_parameter('depth_scale', 0.001)
         self.declare_parameter('min_depth_m', 0.10)
         self.declare_parameter('max_depth_m', 5.0)
@@ -619,35 +655,40 @@ class CoordinateProjectorNode(Node):
         return float(stamp.sec) + float(stamp.nanosec) * 1e-9
 
     def _project_object(self, obj, header):
-        depth_m = self._sample_depth_m(obj.cx, obj.cy)
-        if depth_m is None:
-            return self._invalid_object(obj, header, 'no valid depth near detection center')
+        depth_result = self._sample_object_depth_m(obj)
+        if depth_result is None:
+            return self._invalid_object(obj, header, 'no valid depth near center or bbox roi')
+        depth_m, depth_source, depth_valid_count = depth_result
 
         try:
             point_camera = self._deproject(float(obj.cx), float(obj.cy), depth_m)
         except RuntimeError as exc:
             return self._invalid_object(obj, header, str(exc))
+        point_object = point_camera
         point_target = point_camera
         target_frame = header.frame_id
         message = 'camera_frame'
 
         if self.T_cam2hand is not None:
-            transformed = self._transform_eye_in_hand(point_camera)
+            transformed = self._transform_eye_in_hand_with_pose(point_camera)
             if transformed is None:
                 message = 'camera_frame; eye_in_hand_unavailable: %s' % (self._fk_error or 'missing joints/FK')
             else:
-                point_target = transformed
+                point_object, T_base_hand = transformed
+                point_target, target_message = self._action_target_for_detection(obj, point_object, T_base_hand)
                 target_frame = self.handeye_target_frame or self.base_link or 'base_link'
-                message = 'eye_in_hand_fk'
+                message = 'eye_in_hand_fk; ' + target_message
         elif self.handeye_transform is not None:
-            point_target = self._apply_transform(self.handeye_transform, point_camera)
+            point_object = self._apply_transform(self.handeye_transform, point_camera)
+            point_target = point_object
             target_frame = self.handeye_target_frame or self.target_frame or 'base_link'
             message = 'handeye_npy'
         elif self.target_frame:
             transformed = self._transform_point(point_camera, header.frame_id, self.target_frame)
             if transformed is None:
                 return self._invalid_object(obj, header, 'TF transform unavailable')
-            point_target = transformed
+            point_object = transformed
+            point_target = point_object
             target_frame = self.target_frame
             message = 'transformed'
 
@@ -661,7 +702,11 @@ class CoordinateProjectorNode(Node):
         msg.depth_m = float(depth_m)
         msg.point_camera = self._point_to_msg(point_camera)
         msg.point_target = self._point_to_msg(point_target)
-        msg.message = message
+        msg.message = '%s; depth_source=%s; depth_valid_count=%d' % (
+            message,
+            depth_source,
+            int(depth_valid_count),
+        )
         return msg
 
     def _invalid_object(self, obj, header, message):
@@ -683,6 +728,24 @@ class CoordinateProjectorNode(Node):
         msg.message = message
         return msg
 
+    def _sample_object_depth_m(self, obj):
+        center = self._sample_depth_m(obj.cx, obj.cy)
+        if center is not None:
+            return center[0], 'center', center[1]
+
+        if self.depth_fallback not in ('bbox', 'roi'):
+            return None
+
+        bbox = (float(obj.xmin), float(obj.ymin), float(obj.xmax), float(obj.ymax))
+        roi = self._sample_bbox_depth_m(float(obj.cx), float(obj.cy), bbox, self.depth_roi_scale)
+        if roi is not None:
+            return roi[0], 'bbox_roi', roi[1]
+
+        expanded = self._sample_bbox_depth_m(float(obj.cx), float(obj.cy), bbox, self.depth_expanded_roi_scale)
+        if expanded is not None:
+            return expanded[0], 'bbox_expanded', expanded[1]
+        return None
+
     def _sample_depth_m(self, u, v):
         depth = self.latest_depth
         if depth is None or depth.size == 0:
@@ -698,6 +761,34 @@ class CoordinateProjectorNode(Node):
         if patch.size == 0:
             return None
 
+        return self._valid_depth_median(patch)
+
+    def _sample_bbox_depth_m(self, cx, cy, bbox_xyxy, scale):
+        depth = self.latest_depth
+        if depth is None or depth.size == 0:
+            return None
+        h, w = depth.shape[:2]
+        x1, y1, x2, y2 = bbox_xyxy
+        scale = max(0.01, float(scale))
+        half_w = max(float(self.depth_radius + 1), 0.5 * max(1.0, x2 - x1) * scale)
+        half_h = max(float(self.depth_radius + 1), 0.5 * max(1.0, y2 - y1) * scale)
+
+        left = cx - half_w
+        right = cx + half_w
+        top = cy - half_h
+        bottom = cy + half_h
+        dx0, dy0 = self._map_pixel_to_depth_image(left, top, w, h)
+        dx1, dy1 = self._map_pixel_to_depth_image(right, bottom, w, h)
+        x0, x1 = sorted((dx0, dx1))
+        y0, y1 = sorted((dy0, dy1))
+        x1 = min(w, x1 + 1)
+        y1 = min(h, y1 + 1)
+        patch = np.asarray(depth[y0:y1, x0:x1])
+        if patch.size == 0:
+            return None
+        return self._valid_depth_median(patch)
+
+    def _valid_depth_median(self, patch):
         depth_m = self._depth_patch_to_meters(patch)
         valid = depth_m[
             np.isfinite(depth_m)
@@ -706,7 +797,7 @@ class CoordinateProjectorNode(Node):
         ]
         if valid.size == 0:
             return None
-        return float(np.median(valid))
+        return float(np.median(valid)), int(valid.size)
 
     def _map_pixel_to_depth_image(self, u, v, depth_w, depth_h):
         info = self.latest_camera_info
@@ -763,6 +854,12 @@ class CoordinateProjectorNode(Node):
         return (transform @ point_h)[:3]
 
     def _transform_eye_in_hand(self, point_camera):
+        transformed = self._transform_eye_in_hand_with_pose(point_camera)
+        if transformed is None:
+            return None
+        return transformed[0]
+
+    def _transform_eye_in_hand_with_pose(self, point_camera):
         if self.T_cam2hand is None:
             return None
         joints = self._current_joint_values()
@@ -779,7 +876,37 @@ class CoordinateProjectorNode(Node):
         point_h[:3] = np.asarray(point_camera, dtype=np.float64).reshape(3)
         point_hand = self.T_cam2hand @ point_h
         point_target = T_base_hand @ point_hand
-        return point_target[:3]
+        return point_target[:3], T_base_hand
+
+    def _action_target_for_detection(self, detection, point_object, T_base_hand=None):
+        contact = np.asarray(point_object, dtype=np.float64).reshape(3)
+        messages = []
+        if self._is_blue_point_detection(detection):
+            offset = np.asarray(self.blue_point_target_world_offset_xyz, dtype=np.float64).reshape(3)
+            if np.linalg.norm(offset) > 0.0:
+                contact = contact + offset
+                messages.append('blue_point_world_offset=%s' % self._format_xyz(offset))
+
+        tip_from_wrist = np.asarray(self.dex1_tip_from_wrist_xyz, dtype=np.float64).reshape(3)
+        mount_offset = np.asarray(self.handeye_mount_offset_from_wrist_xyz, dtype=np.float64).reshape(3)
+        tip_from_mount = tip_from_wrist - mount_offset
+        target = contact
+        if T_base_hand is not None:
+            rotation = np.asarray(T_base_hand, dtype=np.float64)[:3, :3]
+            target = contact - rotation @ tip_from_mount
+            messages.append('direct_copy_target')
+        else:
+            messages.append('contact_target_no_fk_rotation')
+        messages.append('contact=%s' % self._format_xyz(contact))
+        messages.append('dex1_tip_from_wrist=%s' % self._format_xyz(tip_from_wrist))
+        messages.append('mount_offset_from_wrist=%s' % self._format_xyz(mount_offset))
+        return target, '; '.join(messages)
+
+    def _is_blue_point_detection(self, detection):
+        return 'blue' in str(getattr(detection, 'class_name', '')).lower()
+
+    def _format_xyz(self, values):
+        return '[%.4f, %.4f, %.4f]' % tuple(float(v) for v in np.asarray(values, dtype=np.float64).reshape(3))
 
     def _current_joint_values(self):
         if self.joint_json_path:
@@ -839,8 +966,8 @@ class CoordinateProjectorNode(Node):
             clamp_to_limits=False,
         )
         transform = np.asarray(poses[self.hand_link].matrix, dtype=np.float64)
-        if self.robot_model == 'h2':
-            offset = np.asarray(self.h2_ee_offset_xyz, dtype=np.float64).reshape(3)
+        offset = np.asarray(self.handeye_mount_offset_from_wrist_xyz, dtype=np.float64).reshape(3)
+        if np.linalg.norm(offset) > 0.0:
             transform = transform.copy()
             transform[:3, 3] = transform[:3, 3] + transform[:3, :3] @ offset
         self.fk_backend_active = 'urdf'
@@ -939,6 +1066,7 @@ class CoordinateProjectorNode(Node):
                 'point_target': self._point_payload(object_3d.point_target),
                 'ik': None,
             }
+            item.update(self._handle_grasp_payload(object_3d.detection, joints))
             if not object_3d.valid:
                 item['ik'] = {'success': False, 'message': object_3d.message or 'invalid 3D object'}
                 payload['objects'].append(item)
@@ -967,6 +1095,286 @@ class CoordinateProjectorNode(Node):
             payload['objects'].append(item)
 
         self._publish_json_string(self.objects_ik_pub, payload)
+
+    def _handle_grasp_payload(self, detection, joints):
+        edge_px = [float(v) for v in getattr(detection, 'handle_grasp_edge_px', [])]
+        center_px = [float(v) for v in getattr(detection, 'handle_grasp_center_px', [])]
+        payload = {}
+        if len(edge_px) != 4 and self.handle_depth_grasp_fallback and self._is_blue_point_detection(detection):
+            fallback = self._estimate_depth_handle_grasp_edge_px(detection)
+            if fallback:
+                edge_px = [float(v) for point in fallback.get('handle_grasp_edge_px', []) for v in point]
+                center_px = [float(v) for v in fallback.get('handle_grasp_center_px', [])]
+                payload.update(fallback)
+        if len(edge_px) == 4:
+            payload['handle_grasp_edge_px'] = [
+                [edge_px[0], edge_px[1]],
+                [edge_px[2], edge_px[3]],
+            ]
+        if len(center_px) == 2:
+            payload['handle_grasp_center_px'] = [center_px[0], center_px[1]]
+        mid_px = [float(v) for v in payload.get('handle_mid_px', [])]
+        if len(mid_px) != 2 and len(center_px) == 2:
+            mid_px = [center_px[0], center_px[1]]
+        width_px = float(getattr(detection, 'handle_grasp_width_px', 0.0))
+        if width_px > 0.0:
+            payload['handle_grasp_width_px'] = width_px
+        source = str(getattr(detection, 'handle_grasp_source', ''))
+        if source:
+            payload['handle_grasp_source'] = source
+        if len(edge_px) != 4 or not joints:
+            return payload
+
+        try:
+            T_base_hand = self._compute_base_to_hand(joints)
+        except Exception as exc:
+            payload['handle_grasp_message'] = 'FK unavailable for grasp endpoints: %s' % exc
+            return payload
+
+        if len(mid_px) == 2:
+            mid_right = self._project_mid_right_air_with_pose(mid_px[0], mid_px[1], T_base_hand)
+            if mid_right is not None:
+                air_world, air_target, surface_world, depth_m, depth_count = mid_right
+                payload['handle_mid_px'] = [float(mid_px[0]), float(mid_px[1])]
+                payload['handle_mid_right_offset_m'] = float(self.handle_mid_right_offset_m)
+                payload['handle_mid_surface_world_m'] = [float(x) for x in surface_world]
+                payload['handle_mid_right_air_world_m'] = [float(x) for x in air_world]
+                payload['handle_mid_right_air_target_m'] = [float(x) for x in air_target]
+                payload['handle_mid_right_air_detail'] = {
+                    'valid': True,
+                    'depth_m': float(depth_m),
+                    'depth_valid_count': int(depth_count),
+                    'message': 'middle right air target',
+                }
+
+        endpoints_world = []
+        endpoint_targets = []
+        endpoint_details = []
+        for u, v in ((edge_px[0], edge_px[1]), (edge_px[2], edge_px[3])):
+            projected = self._project_pixel_with_pose(float(u), float(v), T_base_hand)
+            if projected is None:
+                endpoint_details.append({'valid': False, 'message': 'no valid depth near endpoint'})
+                continue
+            contact, depth_m, depth_count = projected
+            target, target_message = self._action_target_for_detection(detection, contact, T_base_hand)
+            endpoints_world.append([float(x) for x in contact])
+            endpoint_targets.append([float(x) for x in target])
+            endpoint_details.append(
+                {
+                    'valid': True,
+                    'depth_m': float(depth_m),
+                    'depth_valid_count': int(depth_count),
+                    'message': target_message,
+                }
+            )
+
+        payload['handle_grasp_endpoint_details'] = endpoint_details
+        if len(endpoints_world) == 2:
+            ep0 = np.asarray(endpoints_world[0], dtype=np.float64)
+            ep1 = np.asarray(endpoints_world[1], dtype=np.float64)
+            center = 0.5 * (ep0 + ep1)
+            center_target, center_message = self._action_target_for_detection(detection, center, T_base_hand)
+            payload['handle_grasp_endpoints_world_m'] = endpoints_world
+            payload['handle_grasp_endpoint_targets_m'] = endpoint_targets
+            payload['handle_grasp_center_world_m'] = [float(x) for x in center]
+            payload['handle_grasp_ree_target_m'] = [float(x) for x in center_target]
+            payload['handle_grasp_width_m'] = float(np.linalg.norm(ep1 - ep0))
+            payload['handle_grasp_message'] = center_message
+        return payload
+
+    def _estimate_depth_handle_grasp_edge_px(self, detection):
+        depth = self.latest_depth
+        info = self.latest_camera_info
+        if depth is None or depth.size == 0 or info is None:
+            return None
+
+        image_w = int(info.width) if int(info.width) > 0 else 1280
+        image_h = int(info.height) if int(info.height) > 0 else 720
+        cx = float(getattr(detection, 'cx', 0.0))
+        cy = float(getattr(detection, 'cy', 0.0))
+        x1 = max(0.0, cx - float(self.handle_depth_search_left_px))
+        x2 = min(float(image_w - 1), cx - float(self.handle_depth_search_right_px))
+        y1 = max(0.0, cy - float(self.handle_depth_search_y_px))
+        y2 = min(float(image_h - 1), cy + float(self.handle_depth_search_y_px))
+        if x2 <= x1 + 8.0 or y2 <= y1 + 8.0:
+            return None
+
+        h, w = depth.shape[:2]
+        dx0, dy0 = self._map_pixel_to_depth_image(x1, y1, w, h)
+        dx1, dy1 = self._map_pixel_to_depth_image(x2, y2, w, h)
+        dx0, dx1 = sorted((dx0, dx1))
+        dy0, dy1 = sorted((dy0, dy1))
+        dx1 = min(w, dx1 + 1)
+        dy1 = min(h, dy1 + 1)
+        patch = np.asarray(depth[dy0:dy1, dx0:dx1])
+        if patch.size == 0:
+            return None
+
+        depth_m = self._depth_patch_to_meters(patch)
+        valid = np.isfinite(depth_m) & (depth_m >= self.min_depth_m) & (depth_m <= self.max_depth_m)
+        if int(np.count_nonzero(valid)) < 40:
+            return None
+
+        vals = depth_m[valid]
+        background = float(np.percentile(vals, 70.0))
+        near_cut = min(float(np.percentile(vals, 25.0)), background - max(0.002, self.handle_depth_near_delta_m))
+        mask = valid & (depth_m <= near_cut)
+        if int(np.count_nonzero(mask)) < 20:
+            near_cut = float(np.percentile(vals, 18.0))
+            mask = valid & (depth_m <= near_cut)
+        if int(np.count_nonzero(mask)) < 20:
+            return None
+
+        mask_u8 = (mask.astype(np.uint8) * 255)
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 3))
+        mask_u8 = cv2.morphologyEx(mask_u8, cv2.MORPH_OPEN, kernel)
+        mask_u8 = cv2.morphologyEx(mask_u8, cv2.MORPH_CLOSE, kernel, iterations=2)
+        contours, _ = cv2.findContours(mask_u8, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        if not contours:
+            return None
+
+        sx = float(image_w) / float(w)
+        sy = float(image_h) / float(h)
+        blue_pt = np.asarray([cx, cy], dtype=np.float32)
+        scored = []
+        for contour in contours:
+            area = float(cv2.contourArea(contour))
+            if area < 18.0:
+                continue
+            contour_color = contour.astype(np.float32)
+            contour_color[:, 0, 0] = (contour_color[:, 0, 0] + float(dx0)) * sx
+            contour_color[:, 0, 1] = (contour_color[:, 0, 1] + float(dy0)) * sy
+            rect = cv2.minAreaRect(contour_color)
+            rect_w, rect_h = float(rect[1][0]), float(rect[1][1])
+            rect_short = max(1.0, min(rect_w, rect_h))
+            rect_long = max(rect_w, rect_h)
+            if rect_long < 18.0 or rect_short < 5.0:
+                continue
+
+            angle = np.deg2rad(float(rect[2]))
+            axis_w = np.asarray([np.cos(angle), np.sin(angle)], dtype=np.float32)
+            axis_h = np.asarray([-np.sin(angle), np.cos(angle)], dtype=np.float32)
+            if rect_w >= rect_h:
+                long_axis = axis_w
+                short_axis = axis_h
+                long_len = rect_w
+                short_len = rect_h
+            else:
+                long_axis = axis_h
+                short_axis = axis_w
+                long_len = rect_h
+                short_len = rect_w
+
+            center = np.asarray(rect[0], dtype=np.float32)
+            end_a = center - long_axis * (long_len * 0.5)
+            end_b = center + long_axis * (long_len * 0.5)
+            use_a = np.linalg.norm(end_a - blue_pt) <= np.linalg.norm(end_b - blue_pt)
+            tip = end_a if use_a else end_b
+            inward = long_axis if use_a else -long_axis
+            target_center = tip + inward * (long_len * 0.10)
+            cross_half = short_axis * (short_len * 0.5)
+            endpoints = np.stack([target_center - cross_half, target_center + cross_half], axis=0)
+            tip_dist = float(np.linalg.norm(tip - blue_pt))
+            center_dist = float(np.linalg.norm(target_center - blue_pt))
+            if tip_dist > self.handle_depth_max_blue_distance_px:
+                continue
+            distance_score = -3.0 * tip_dist - 0.5 * center_dist
+            right_side_score = 0.25 * float(target_center[0])
+            area_score = min(25.0, 0.004 * float(area))
+            length_score = min(20.0, 0.15 * float(rect_long))
+            scored.append(
+                (
+                    distance_score + right_side_score + area_score + length_score,
+                    endpoints,
+                    target_center,
+                    rect_long,
+                    area,
+                    near_cut,
+                    background,
+                    tip_dist,
+                    center,
+                )
+            )
+
+        if not scored:
+            return None
+        _, endpoints, center, long_len, area, near_cut, background, tip_dist, rect_center = max(scored, key=lambda item: item[0])
+        endpoints[:, 0] = np.clip(endpoints[:, 0], 0.0, float(image_w - 1))
+        endpoints[:, 1] = np.clip(endpoints[:, 1], 0.0, float(image_h - 1))
+        center[0] = np.clip(center[0], 0.0, float(image_w - 1))
+        center[1] = np.clip(center[1], 0.0, float(image_h - 1))
+        rect_center = np.asarray(rect_center, dtype=np.float32)
+        rect_center[0] = np.clip(rect_center[0], 0.0, float(image_w - 1))
+        rect_center[1] = np.clip(rect_center[1], 0.0, float(image_h - 1))
+        endpoints_i = [[int(round(float(p[0]))), int(round(float(p[1])))] for p in endpoints]
+        result = {
+            'handle_grasp_edge_px': endpoints_i,
+            'handle_grasp_center_px': [int(round(float(center[0]))), int(round(float(center[1])))],
+            'handle_mid_px': [int(round(float(rect_center[0]))), int(round(float(rect_center[1])))],
+            'handle_grasp_width_px': float(np.linalg.norm(endpoints[1] - endpoints[0])),
+            'handle_grasp_source': 'depth_near_blue_left_roi',
+            'handle_depth_near_cut_m': float(near_cut),
+            'handle_depth_background_m': float(background),
+            'handle_depth_mask_area_px': float(area),
+            'handle_grasp_long_axis_length_px': float(long_len),
+            'handle_depth_tip_distance_px': float(tip_dist),
+        }
+        now = time.time()
+        previous = self._last_depth_handle_grasp
+        if previous is not None and now - float(previous.get('time', 0.0)) < 1.0:
+            prev_center = np.asarray(previous.get('center_px', []), dtype=np.float64)
+            new_center = np.asarray(result['handle_grasp_center_px'], dtype=np.float64)
+            if prev_center.shape == (2,) and np.linalg.norm(prev_center - new_center) > self.handle_depth_sticky_px:
+                prev_result = dict(previous.get('result', {}))
+                if prev_result:
+                    prev_result['handle_grasp_source'] = str(prev_result.get('handle_grasp_source', 'depth_near_blue_left_roi')) + '_sticky'
+                    return prev_result
+        self._last_depth_handle_grasp = {
+            'time': now,
+            'center_px': result['handle_grasp_center_px'],
+            'result': dict(result),
+        }
+        return result
+
+    def _project_pixel_with_pose(self, u, v, T_base_hand):
+        if self.T_cam2hand is None:
+            return None
+        depth = self._sample_depth_m(u, v)
+        if depth is None:
+            return None
+        depth_m, depth_count = depth
+        point_camera = self._deproject(float(u), float(v), float(depth_m))
+        point_h = np.ones(4, dtype=np.float64)
+        point_h[:3] = point_camera
+        point_hand = self.T_cam2hand @ point_h
+        point_base = T_base_hand @ point_hand
+        return point_base[:3], float(depth_m), int(depth_count)
+
+    def _project_mid_right_air_with_pose(self, u, v, T_base_hand):
+        projected = self._project_pixel_with_pose(float(u), float(v), T_base_hand)
+        if projected is None:
+            return None
+        surface_world, depth_m, depth_count = projected
+
+        info = self.latest_camera_info
+        image_w = int(info.width) if info is not None and int(info.width) > 0 else 1280
+        du = 10.0
+        u_right = min(float(image_w - 1), float(u) + du)
+        point_camera = self._deproject(float(u), float(v), float(depth_m))
+        point_camera_right = self._deproject(u_right, float(v), float(depth_m))
+        direction_camera = point_camera_right - point_camera
+        if np.linalg.norm(direction_camera) <= 1e-9:
+            return None
+
+        rotation_cam_to_base = np.asarray(T_base_hand, dtype=np.float64)[:3, :3] @ np.asarray(self.T_cam2hand, dtype=np.float64)[:3, :3]
+        direction_world = rotation_cam_to_base @ direction_camera
+        norm = np.linalg.norm(direction_world)
+        if norm <= 1e-9:
+            return None
+        direction_world = direction_world / norm
+        air_world = np.asarray(surface_world, dtype=np.float64).reshape(3) + direction_world * float(self.handle_mid_right_offset_m)
+        air_target, _ = self._action_target_for_detection(None, air_world, T_base_hand)
+        return air_world, air_target, np.asarray(surface_world, dtype=np.float64).reshape(3), float(depth_m), int(depth_count)
 
     def _publish_json_string(self, publisher, payload):
         msg = String()
@@ -1014,7 +1422,7 @@ class CoordinateProjectorNode(Node):
         }
 
     def _solve_object_ik(self, object_3d, joints):
-        target_pose = self._ik_target_pose_matrix(object_3d.point_target)
+        target_pose = self._ik_target_pose_matrix(object_3d.point_target, joints)
         return self._ik_solver.solve(
             target_link=self.ik_target_link or self.hand_link or self._default_hand_link(),
             target_pose=target_pose,
@@ -1074,7 +1482,7 @@ class CoordinateProjectorNode(Node):
             return
 
         try:
-            target_pose = self._ik_target_pose_matrix(object_3d.point_target)
+            target_pose = self._ik_target_pose_matrix(object_3d.point_target, joints)
             solution = self._ik_solver.solve(
                 target_link=self.ik_target_link or self.hand_link or self._default_hand_link(),
                 target_pose=target_pose,
@@ -1109,9 +1517,14 @@ class CoordinateProjectorNode(Node):
         joint_msg.position = [float(solution.joint_values[name]) for name in solution.active_joints]
         self.target_joint_state_pub.publish(joint_msg)
 
-    def _ik_target_pose_matrix(self, point_msg):
+    def _ik_target_pose_matrix(self, point_msg, joints=None):
         qx, qy, qz, qw = self.pose_orientation_xyzw
         rotation = self._quat_to_matrix([qx, qy, qz, qw])
+        if joints:
+            try:
+                rotation = np.asarray(self._compute_base_to_hand(joints), dtype=np.float64)[:3, :3]
+            except Exception as exc:
+                self._warn_ik('IK using configured orientation; current wrist rotation unavailable: %s' % exc)
         position = np.array([point_msg.x, point_msg.y, point_msg.z], dtype=np.float64)
         position = position + np.asarray(self.ik_target_position_offset_xyz, dtype=np.float64).reshape(3)
         ee_offset = np.asarray(self.ik_end_effector_offset_xyz, dtype=np.float64).reshape(3)

@@ -78,7 +78,6 @@ unset LD_LIBRARY_PATH
 source /opt/ros/humble/setup.bash
 source install/setup.bash
 
-export PYTHONPATH=/home/unitree/MscapeTech/unitree_sdk2_python:$PYTHONPATH
 export ROS_DOMAIN_ID=42
 export ROS_DISABLE_DAEMON=1
 export RMW_IMPLEMENTATION=rmw_fastrtps_cpp
@@ -92,7 +91,16 @@ Important:
 
 - Do not add spaces after `\`.
 - Do not run this inside conda.
-- Do not overwrite `PYTHONPATH`; always prepend Unitree SDK with `:$PYTHONPATH`.
+- Do not set `PYTHONPATH` manually for daily launch; the H2 Unitree SDK path is handled inside the node.
+
+Target compensation:
+
+- `dex1_tip_from_wrist_xyz: [0.14, 0.01, 0.012]` is the measured Dex1-1 fingertip position relative to `right_wrist_yaw_link`.
+- The ROS `point_target` is the desired Dex1-1 fingertip contact point in the target/world frame.
+- ROS IK uses `ik_end_effector_offset_xyz: [0.14, 0.01, 0.012]` to solve wrist/arm joints from that contact point.
+- Blue push points additionally apply `blue_point_target_world_offset_xyz: [0.0, 0.0, -0.004]`, so only the blue button target is moved 4 mm toward the ground.
+- `fk_backend: urdf` and `lock_waist: false` are intentional: waist joints from `rt/lf/lowstate` must be used, otherwise targets drift badly after lower-body/waist motion.
+- `handeye_mount_offset_from_wrist_xyz: [0.05, 0.0, 0.0]` only keeps the existing hand-eye calibration frame consistent; it is not the robot-side target.
 
 Expected nodes:
 
@@ -313,4 +321,3 @@ If a process dies, send the full traceback, especially the 20 lines before:
 ```text
 process has died
 ```
-

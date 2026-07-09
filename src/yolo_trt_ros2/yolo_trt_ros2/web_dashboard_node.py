@@ -160,6 +160,43 @@ INDEX_HTML = """<!doctype html>
       overflow: hidden;
       text-overflow: ellipsis;
     }
+    .grasp-point {
+      position: absolute;
+      width: 12px;
+      height: 12px;
+      margin-left: -6px;
+      margin-top: -6px;
+      border: 2px solid #ffdf4d;
+      background: #ff365f;
+      box-sizing: border-box;
+      pointer-events: auto;
+      cursor: copy;
+    }
+    .grasp-center {
+      position: absolute;
+      width: 22px;
+      height: 22px;
+      margin-left: -11px;
+      margin-top: -11px;
+      color: #ff365f;
+      font-size: 22px;
+      line-height: 22px;
+      font-weight: 800;
+      text-align: center;
+      pointer-events: none;
+    }
+    .mid-air-point {
+      position: absolute;
+      width: 14px;
+      height: 14px;
+      margin-left: -7px;
+      margin-top: -7px;
+      border: 2px solid #ffffff;
+      background: #00d4ff;
+      box-sizing: border-box;
+      pointer-events: auto;
+      cursor: copy;
+    }
     #tooltip {
       position: fixed;
       z-index: 20;
@@ -323,6 +360,11 @@ INDEX_HTML = """<!doctype html>
       return `[${p.map(v => fmt(v, 4)).join(", ")}]`;
     }
 
+    function xyzText(values) {
+      if (!values || values.length !== 3) return "";
+      return values.map(v => fmt(v, 4)).join(" ");
+    }
+
     function ikText(obj) {
       const ik = obj.ik;
       if (!ik || !ik.joint_values_rad) return "ik unavailable";
@@ -386,7 +428,7 @@ INDEX_HTML = """<!doctype html>
           const tooltip = document.getElementById("tooltip");
           if (stable) {
             tooltip.textContent =
-              `${label.textContent}\\nworld ${coordText(obj)}\\n${ikText(obj)}\\nclick to copy world`;
+              `${label.textContent}\\nworld ${coordText(obj)}\\n${obj.message || ""}\\n${ikText(obj)}\\nclick to copy world`;
           } else {
             tooltip.textContent =
               `${label.textContent}\\nstabilizing ${fmt((obj.stable_ms || 0) / 1000, 1)}/3.0s`;
@@ -400,13 +442,100 @@ INDEX_HTML = """<!doctype html>
         });
         div.addEventListener("click", async () => {
           if (!stable || !obj.point_torso_m) return;
-          const text = coordText(obj);
+          const text = obj.handle_mid_right_air_target_m
+            ? xyzText(obj.handle_mid_right_air_target_m)
+            : (obj.handle_grasp_ree_target_m ? xyzText(obj.handle_grasp_ree_target_m) : coordText(obj));
           await copyText(text);
           const copy = document.getElementById("copy");
           copy.textContent = `copied ${text}`;
           setTimeout(() => { copy.textContent = ""; }, 1800);
         });
+        div.addEventListener("dblclick", async ev => {
+          ev.stopPropagation();
+          const target = obj.handle_mid_right_air_target_m || obj.handle_grasp_ree_target_m;
+          if (!stable || !target) return;
+          const text = xyzText(target);
+          await copyText(text);
+          const copy = document.getElementById("copy");
+          copy.textContent = `copied handle target ${text}`;
+          setTimeout(() => { copy.textContent = ""; }, 1800);
+        });
         overlay.appendChild(div);
+
+        const edge = obj.handle_grasp_edge_px || [];
+        const targets = obj.handle_grasp_endpoint_targets_m || [];
+        edge.forEach((p, endpointIndex) => {
+          if (!p || p.length !== 2) return;
+          const marker = document.createElement("div");
+          marker.className = "grasp-point";
+          marker.style.left = `${p[0] * sx}px`;
+          marker.style.top = `${p[1] * sy}px`;
+          marker.addEventListener("mousemove", ev => {
+            const tooltip = document.getElementById("tooltip");
+            const target = targets[endpointIndex];
+            tooltip.textContent =
+              `${obj.object_id || ""} handle endpoint ${endpointIndex}\\npx [${fmt(p[0], 1)}, ${fmt(p[1], 1)}]\\ntarget ${target ? xyzText(target) : "unavailable"}\\ndouble click to copy`;
+            tooltip.style.display = "block";
+            tooltip.style.left = `${ev.clientX + 14}px`;
+            tooltip.style.top = `${ev.clientY + 14}px`;
+          });
+          marker.addEventListener("mouseleave", () => {
+            document.getElementById("tooltip").style.display = "none";
+          });
+          marker.addEventListener("dblclick", async ev => {
+            ev.stopPropagation();
+            const target = targets[endpointIndex];
+            if (!target) return;
+            const text = xyzText(target);
+            await copyText(text);
+            const copy = document.getElementById("copy");
+            copy.textContent = `copied endpoint ${endpointIndex} ${text}`;
+            setTimeout(() => { copy.textContent = ""; }, 1800);
+          });
+          overlay.appendChild(marker);
+        });
+
+        const center = obj.handle_grasp_center_px || [];
+        if (center.length === 2) {
+          const centerMarker = document.createElement("div");
+          centerMarker.className = "grasp-center";
+          centerMarker.style.left = `${center[0] * sx}px`;
+          centerMarker.style.top = `${center[1] * sy}px`;
+          centerMarker.textContent = "+";
+          overlay.appendChild(centerMarker);
+        }
+
+        const mid = obj.handle_mid_px || [];
+        if (mid.length === 2) {
+          const midMarker = document.createElement("div");
+          midMarker.className = "mid-air-point";
+          midMarker.style.left = `${mid[0] * sx}px`;
+          midMarker.style.top = `${mid[1] * sy}px`;
+          midMarker.addEventListener("mousemove", ev => {
+            const tooltip = document.getElementById("tooltip");
+            const target = obj.handle_mid_right_air_target_m;
+            const world = obj.handle_mid_right_air_world_m;
+            tooltip.textContent =
+              `${obj.object_id || ""} handle mid-right air\\npx [${fmt(mid[0], 1)}, ${fmt(mid[1], 1)}]\\nworld ${world ? xyzText(world) : "unavailable"}\\ntarget ${target ? xyzText(target) : "unavailable"}\\ndouble click to copy`;
+            tooltip.style.display = "block";
+            tooltip.style.left = `${ev.clientX + 14}px`;
+            tooltip.style.top = `${ev.clientY + 14}px`;
+          });
+          midMarker.addEventListener("mouseleave", () => {
+            document.getElementById("tooltip").style.display = "none";
+          });
+          midMarker.addEventListener("dblclick", async ev => {
+            ev.stopPropagation();
+            const target = obj.handle_mid_right_air_target_m;
+            if (!target) return;
+            const text = xyzText(target);
+            await copyText(text);
+            const copy = document.getElementById("copy");
+            copy.textContent = `copied mid-right air ${text}`;
+            setTimeout(() => { copy.textContent = ""; }, 1800);
+          });
+          overlay.appendChild(midMarker);
+        }
       });
     }
 
@@ -807,7 +936,7 @@ def quaternion_to_dict(quat):
 
 
 def object2d_to_dict(obj):
-    return {
+    payload = {
         'class_name': str(obj.class_name),
         'class_id': int(obj.class_id),
         'confidence': float(obj.confidence),
@@ -818,6 +947,19 @@ def object2d_to_dict(obj):
         'cx': float(obj.cx),
         'cy': float(obj.cy),
     }
+    edge_px = [float(v) for v in getattr(obj, 'handle_grasp_edge_px', [])]
+    center_px = [float(v) for v in getattr(obj, 'handle_grasp_center_px', [])]
+    if len(edge_px) == 4:
+        payload['handle_grasp_edge_px'] = [[edge_px[0], edge_px[1]], [edge_px[2], edge_px[3]]]
+    if len(center_px) == 2:
+        payload['handle_grasp_center_px'] = [center_px[0], center_px[1]]
+    width_px = float(getattr(obj, 'handle_grasp_width_px', 0.0))
+    if width_px > 0.0:
+        payload['handle_grasp_width_px'] = width_px
+    source = str(getattr(obj, 'handle_grasp_source', ''))
+    if source:
+        payload['handle_grasp_source'] = source
+    return payload
 
 
 def object2d_array_to_dict(msg):
@@ -912,6 +1054,32 @@ def dashboard_objects_to_dict(objects3d_msg, objects_ik_json):
             'message': str(obj.message),
             'ik': ik_item.get('ik'),
         }
+        for key in (
+            'handle_grasp_edge_px',
+            'handle_grasp_center_px',
+            'handle_mid_px',
+            'handle_grasp_width_px',
+            'handle_grasp_source',
+            'handle_grasp_endpoints_world_m',
+            'handle_grasp_endpoint_targets_m',
+            'handle_grasp_center_world_m',
+            'handle_grasp_ree_target_m',
+            'handle_mid_surface_world_m',
+            'handle_mid_right_air_world_m',
+            'handle_mid_right_air_target_m',
+            'handle_mid_right_offset_m',
+            'handle_mid_right_air_detail',
+            'handle_grasp_width_m',
+            'handle_grasp_endpoint_details',
+            'handle_grasp_message',
+            'handle_depth_near_cut_m',
+            'handle_depth_background_m',
+            'handle_depth_mask_area_px',
+            'handle_grasp_long_axis_length_px',
+            'handle_depth_tip_distance_px',
+        ):
+            if key in ik_item:
+                item[key] = ik_item[key]
         objects.append(item)
     return objects
 

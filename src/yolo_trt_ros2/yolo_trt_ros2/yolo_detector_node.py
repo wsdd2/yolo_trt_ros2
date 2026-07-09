@@ -2,6 +2,7 @@
 import os
 
 import cv2
+import numpy as np
 import rclpy
 from cv_bridge import CvBridge
 from rclpy.node import Node
@@ -186,6 +187,7 @@ class YoloDetectorNode(Node):
             return
         if self.detect_blue_point:
             detections = list(detections) + self._detect_blue_point(bgr_image, detections)
+        detections = self._attach_handle_grasp_edges(bgr_image, detections)
 
         objects_msg = self._build_objects_msg(image_msg.header, detections)
         self.objects_pub.publish(objects_msg)
@@ -211,6 +213,12 @@ class YoloDetectorNode(Node):
             obj.ymax = int(det.get('ymax', 0))
             obj.cx = float(det.get('cx', float(obj.xmin + obj.xmax) * 0.5))
             obj.cy = float(det.get('cy', float(obj.ymin + obj.ymax) * 0.5))
+            edge_px = det.get('handle_grasp_edge_px') or []
+            center_px = det.get('handle_grasp_center_px') or []
+            obj.handle_grasp_edge_px = [float(v) for point in edge_px for v in point]
+            obj.handle_grasp_center_px = [float(v) for v in center_px]
+            obj.handle_grasp_width_px = float(det.get('handle_grasp_width_px', 0.0))
+            obj.handle_grasp_source = str(det.get('handle_grasp_source', ''))
             msg.objects.append(obj)
 
         return msg
@@ -230,6 +238,23 @@ class YoloDetectorNode(Node):
             center_color = (255, 0, 0) if 'blue' in class_name.lower() else (0, 0, 255)
             cv2.rectangle(image, (xmin, ymin), (xmax, ymax), color, 2)
             cv2.circle(image, (cx, cy), 5, center_color, -1)
+            edge_px = det.get('handle_grasp_edge_px') or []
+            if len(edge_px) == 2:
+                p0 = (int(edge_px[0][0]), int(edge_px[0][1]))
+                p1 = (int(edge_px[1][0]), int(edge_px[1][1]))
+                cv2.line(image, p0, p1, (0, 0, 255), 3)
+                cv2.circle(image, p0, 5, (0, 255, 255), -1)
+                cv2.circle(image, p1, 5, (0, 255, 255), -1)
+            center_px = det.get('handle_grasp_center_px') or []
+            if len(center_px) == 2:
+                cv2.drawMarker(
+                    image,
+                    (int(center_px[0]), int(center_px[1])),
+                    (0, 0, 255),
+                    markerType=cv2.MARKER_CROSS,
+                    markerSize=22,
+                    thickness=2,
+                )
             label = '%s %.2f' % (class_name, confidence)
             cv2.putText(
                 image,
@@ -242,6 +267,126 @@ class YoloDetectorNode(Node):
                 cv2.LINE_AA,
             )
         return image
+
+    def _attach_handle_grasp_edges(self, image, detections):
+        if image is None or image.size == 0:
+            return list(detections)
+        detections = [dict(det) for det in detections]
+        blue = self._best_blue_detection(detections)
+        for det in detections:
+            if not self._is_handle_detection(det):
+                continue
+            grasp = self._estimate_handle_grasp_edge(image, det, blue)
+            if grasp:
+                det.update(grasp)
+        return detections
+
+    def _best_blue_detection(self, detections):
+        blue = [
+            det for det in detections
+            if 'blue' in str(det.get('class_name', '')).lower()
+        ]
+        if not blue:
+            return None
+        return max(blue, key=lambda det: float(det.get('confidence', 0.0)))
+
+    def _is_handle_detection(self, det):
+        name = str(det.get('class_name', '')).lower()
+        return any(token in name for token in ('handle', 'lever', 'pull', 'cabinet door'))
+
+    def _estimate_handle_grasp_edge(self, image, handle, blue, min_area=220.0, inset_ratio=0.10):
+        img_h, img_w = image.shape[:2]
+        x1 = int(handle.get('xmin', 0))
+        y1 = int(handle.get('ymin', 0))
+        x2 = int(handle.get('xmax', 0))
+        y2 = int(handle.get('ymax', 0))
+        pad_x = max(8, int((x2 - x1) * 0.08))
+        pad_y = max(8, int((y2 - y1) * 0.08))
+        rx1 = max(0, x1 - pad_x)
+        ry1 = max(0, y1 - pad_y)
+        rx2 = min(img_w, x2 + pad_x)
+        ry2 = min(img_h, y2 + pad_y)
+        crop = image[ry1:ry2, rx1:rx2]
+        if crop.size == 0:
+            return None
+
+        hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
+        mask = cv2.inRange(hsv, (0, 0, 0), (179, 255, 92))
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (7, 5))
+        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=2)
+        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        if not contours:
+            return None
+
+        blue_pt = None
+        if blue is not None:
+            blue_pt = np.asarray(
+                [
+                    float(blue.get('cx', 0.0)),
+                    float(blue.get('cy', 0.0)),
+                ],
+                dtype=np.float32,
+            )
+
+        scored = []
+        for contour in contours:
+            area = float(cv2.contourArea(contour))
+            if area < min_area:
+                continue
+            rect = cv2.minAreaRect(contour)
+            center_local = np.asarray(rect[0], dtype=np.float32)
+            rect_w, rect_h = float(rect[1][0]), float(rect[1][1])
+            rect_short = max(1.0, min(rect_w, rect_h))
+            rect_long = max(rect_w, rect_h)
+            if rect_long / rect_short < 2.0:
+                continue
+
+            angle = np.deg2rad(float(rect[2]))
+            axis_w = np.asarray([np.cos(angle), np.sin(angle)], dtype=np.float32)
+            axis_h = np.asarray([-np.sin(angle), np.cos(angle)], dtype=np.float32)
+            if rect_w >= rect_h:
+                long_axis = axis_w
+                short_axis = axis_h
+                long_len = rect_w
+                short_len = rect_h
+            else:
+                long_axis = axis_h
+                short_axis = axis_w
+                long_len = rect_h
+                short_len = rect_w
+            if long_len < 20.0 or short_len < 6.0:
+                continue
+
+            center_global = center_local + np.asarray([rx1, ry1], dtype=np.float32)
+            end_a = center_global - long_axis * (long_len * 0.5)
+            end_b = center_global + long_axis * (long_len * 0.5)
+            if blue_pt is not None:
+                use_a = np.linalg.norm(end_a - blue_pt) <= np.linalg.norm(end_b - blue_pt)
+            else:
+                use_a = float(end_a[0]) >= float(end_b[0])
+            tip = end_a if use_a else end_b
+            inward = long_axis if use_a else -long_axis
+            target_center = tip + inward * (long_len * max(0.0, min(0.45, float(inset_ratio))))
+            cross_half = short_axis * (short_len * 0.5)
+            endpoints = np.stack([target_center - cross_half, target_center + cross_half], axis=0)
+            score = -float(np.linalg.norm(tip - blue_pt)) if blue_pt is not None else float(tip[0])
+            score += 0.0005 * area
+            scored.append((score, endpoints, target_center, long_len, area))
+
+        if not scored:
+            return None
+        _, endpoints, center, long_len, area = max(scored, key=lambda item: item[0])
+        width_px = float(np.linalg.norm(endpoints[1] - endpoints[0]))
+        endpoints_i = [[int(round(float(p[0]))), int(round(float(p[1])))] for p in endpoints]
+        return {
+            'handle_grasp_edge_px': endpoints_i,
+            'handle_grasp_center_px': [int(round(float(center[0]))), int(round(float(center[1])))],
+            'handle_grasp_width_px': width_px,
+            'handle_grasp_source': 'opencv_black_end_inset_near_blue' if blue is not None else 'opencv_black_end_inset',
+            'handle_grasp_mask_area_px': float(area),
+            'handle_grasp_long_axis_length_px': float(long_len),
+        }
 
     def _detect_blue_point(self, image, detections):
         if image is None or image.size == 0:

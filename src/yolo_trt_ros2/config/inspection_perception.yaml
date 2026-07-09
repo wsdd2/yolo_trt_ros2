@@ -71,12 +71,25 @@ coordinate_projector:
     lowstate_topic: rt/lf/lowstate
     joint_json_path: ''
     lock_waist: true
-    fk_backend: auto
+    fk_backend: xr_pinocchio
     h2_xr_scripts_dir: /home/unitree/H2_joint_cartesian/scripts
-    h2_ee_offset_xyz: [0.05, 0.0, 0.0]
+    handeye_mount_offset_from_wrist_xyz: [0.05, 0.0, 0.0]
+    dex1_tip_from_wrist_xyz: [0.14, 0.01, 0.012]
+    blue_point_target_world_offset_xyz: [0.0, 0.0, -0.004]
     class_filter: ''
     min_confidence: 0.25
     depth_radius: 3
+    depth_fallback: bbox
+    depth_roi_scale: 0.55
+    depth_expanded_roi_scale: 1.8
+    handle_depth_grasp_fallback: true
+    handle_depth_search_left_px: 360
+    handle_depth_search_right_px: 18
+    handle_depth_search_y_px: 70
+    handle_depth_near_delta_m: 0.015
+    handle_depth_max_blue_distance_px: 180.0
+    handle_depth_sticky_px: 45.0
+    handle_mid_right_offset_m: 0.01
     depth_scale: 0.001
     min_depth_m: 0.10
     max_depth_m: 5.0

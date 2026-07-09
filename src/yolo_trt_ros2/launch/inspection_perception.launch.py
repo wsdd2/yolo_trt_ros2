@@ -22,6 +22,21 @@ def generate_launch_description():
         default_value='true',
         description='Start direct RealSense RGB-D publisher inside this launch.',
     )
+    dex1_tip_arg = DeclareLaunchArgument(
+        'dex1_tip_from_wrist_xyz',
+        default_value='[0.14, 0.01, 0.012]',
+        description='Dex1-1 fingertip/contact point offset from right_wrist_yaw_link, meters.',
+    )
+    blue_point_offset_arg = DeclareLaunchArgument(
+        'blue_point_target_world_offset_xyz',
+        default_value='[0.0, 0.0, -0.004]',
+        description='World-frame offset applied only to blue push point targets, meters.',
+    )
+    handeye_mount_offset_arg = DeclareLaunchArgument(
+        'handeye_mount_offset_from_wrist_xyz',
+        default_value='[0.05, 0.0, 0.0]',
+        description='Existing hand-eye calibration mount offset from right_wrist_yaw_link, meters.',
+    )
 
     direct_camera_node = Node(
         package='yolo_trt_ros2',
@@ -52,6 +67,14 @@ def generate_launch_description():
             '__node:=coordinate_projector',
             '--params-file',
             LaunchConfiguration('config_file'),
+            '-p',
+            ['dex1_tip_from_wrist_xyz:=', LaunchConfiguration('dex1_tip_from_wrist_xyz')],
+            '-p',
+            ['ik_end_effector_offset_xyz:=', LaunchConfiguration('handeye_mount_offset_from_wrist_xyz')],
+            '-p',
+            ['blue_point_target_world_offset_xyz:=', LaunchConfiguration('blue_point_target_world_offset_xyz')],
+            '-p',
+            ['handeye_mount_offset_from_wrist_xyz:=', LaunchConfiguration('handeye_mount_offset_from_wrist_xyz')],
         ],
         additional_env={
             'LD_LIBRARY_PATH': [
@@ -73,6 +96,9 @@ def generate_launch_description():
     return LaunchDescription([
         config_arg,
         use_direct_camera_arg,
+        dex1_tip_arg,
+        blue_point_offset_arg,
+        handeye_mount_offset_arg,
         direct_camera_node,
         detector_node,
         coordinate_node,
