@@ -1,0 +1,141 @@
+# Cabinet multi-control perception profile (validate on direct script first).
+# Diff vs inspection_perception.yaml:
+#   - prompt_free: false + cabinet class list
+#   - detect_blue_point: false
+#   - best_handle_only / handle filters off
+# After direct validation, point yoloe_classes_path at the private copy of
+# cabinet_controls_classes.example.txt on the H2.
+
+direct_realsense:
+  ros__parameters:
+    workspace_root: /home/unitree/MscapeTech
+    color_topic: /camera/color/image_raw
+    depth_topic: /camera/aligned_depth_to_color/image_raw
+    camera_info_topic: /camera/color/camera_info
+    color_frame_id: camera_color_optical_frame
+    depth_frame_id: camera_color_optical_frame
+    width: 1280
+    height: 720
+    fps: 30
+    depth_width: 640
+    depth_height: 480
+    depth_fps: 30
+    cam_index: 0
+    cam_serial: ''
+    frame_timeout_ms: 1000
+    publish_period_sec: 0.033
+    restart_on_timeout_count: 30
+
+yolo_detector:
+  ros__parameters:
+    image_topic: /camera/color/image_raw
+    objects_topic: /detector/objects
+    debug_image_topic: /detector/debug_image
+    backend: yoloe
+    model_path: /home/unitree/MscapeTech/models/yoloe-11s-seg.pt
+    mobileclip_path: ''
+    model_kind: yoloe
+    # Copy cabinet_controls_classes.example.txt -> config/private/yoloe_classes.txt
+    yoloe_classes_path: /home/unitree/MscapeTech/Foxy_ROS/src/yolo_trt_ros2/config/private/yoloe_classes.txt
+    prompts: ''
+    prompt_free: false
+    best_handle_only: false
+    filter_prompt_free_handles: false
+    detect_blue_point: false
+    blue_point_class_name: blue push point
+    blue_point_min_area: 40.0
+    blue_point_max_area_ratio: 0.02
+    conf_thres: 0.15
+    iou_thres: 0.45
+    imgsz: 640
+    device: ''
+    publish_debug_image: true
+
+coordinate_projector:
+  ros__parameters:
+    objects_topic: /detector/objects
+    depth_topic: /camera/aligned_depth_to_color/image_raw
+    camera_info_topic: /camera/color/camera_info
+    objects_3d_topic: /detector/objects_3d
+    target_point_topic: /detector/target_point
+    target_pose_topic: /detector/target_pose
+    target_joint_state_topic: /detector/target_joint_state
+    current_joint_state_topic: /detector/current_joint_state
+    objects_ik_topic: /detector/objects_ik_json
+    robot_status_topic: /robot/inspection_status
+    target_frame: ''
+    handeye_mode: eye-in-hand
+    handeye_npy_path: /home/unitree/MscapeTech/Hand_Eye_Calib/outputs/eye_in_hand_20260630_150210.json
+    handeye_target_frame: pelvis
+    robot_model: h2
+    workspace_root: /home/unitree/MscapeTech
+    urdf_path: /home/unitree/H2_joint_cartesian/third_party/xr_teleoperate/assets/h2/H2.urdf
+    base_link: pelvis
+    hand_link: right_wrist_yaw_link
+    camera_link: ''
+    network_interface: eth0
+    domain_id: 0
+    lowstate_topic: rt/lf/lowstate
+    joint_json_path: ''
+    lock_waist: true
+    fk_backend: xr_pinocchio
+    h2_xr_scripts_dir: /home/unitree/H2_joint_cartesian/scripts
+    handeye_mount_offset_from_wrist_xyz: [0.05, 0.0, 0.0]
+    dex1_tip_from_wrist_xyz: [0.14, 0.01, 0.012]
+    # Generic pressable offset until per-class offsets are wired into the ROS node.
+    blue_point_target_world_offset_xyz: [0.0, 0.0, -0.003]
+    class_filter: ''
+    min_confidence: 0.15
+    depth_radius: 3
+    depth_fallback: bbox
+    depth_roi_scale: 0.55
+    depth_expanded_roi_scale: 1.8
+    handle_depth_grasp_fallback: false
+    handle_depth_search_left_px: 360
+    handle_depth_search_right_px: 18
+    handle_depth_search_y_px: 70
+    handle_depth_near_delta_m: 0.015
+    handle_depth_max_blue_distance_px: 180.0
+    handle_depth_sticky_px: 45.0
+    handle_mid_right_offset_m: 0.01
+    depth_scale: 0.001
+    min_depth_m: 0.10
+    max_depth_m: 5.0
+    publish_invalid: false
+    publish_target_pose: true
+    target_pose_orientation_xyzw: [0.0, 0.0, 0.0, 1.0]
+    publish_target_joint_state: true
+    publish_current_joint_state: true
+    publish_objects_ik_json: true
+    publish_failed_ik_solution: false
+    ik_target_link: right_wrist_yaw_link
+    ik_active_joints: 'right_shoulder_pitch_joint,right_shoulder_roll_joint,right_shoulder_yaw_joint,right_elbow_joint,right_wrist_roll_joint,right_wrist_pitch_joint,right_wrist_yaw_joint'
+    ik_end_effector_offset_xyz: [0.05, 0.0, 0.0]
+    ik_target_position_offset_xyz: [0.0, 0.0, 0.0]
+    ik_max_iterations: 120
+    ik_tolerance_position: 0.005
+    ik_tolerance_orientation: 3.2
+    ik_damping: 0.001
+    ik_step_scale: 0.4
+    ik_position_weight: 1.0
+    ik_orientation_weight: 0.0
+    max_ik_objects: 48
+    stale_depth_sec: 0.5
+    transform_timeout_sec: 0.05
+
+web_dashboard:
+  ros__parameters:
+    web_host: '0.0.0.0'
+    web_port: 8080
+    public_host: '192.168.25.189'
+    jpeg_quality: 80
+    frame_timeout_sec: 2.0
+    debug_image_topic: /detector/debug_image
+    objects_topic: /detector/objects
+    objects_3d_topic: /detector/objects_3d
+    target_point_topic: /detector/target_point
+    target_pose_topic: /detector/target_pose
+    target_joint_state_topic: /detector/target_joint_state
+    current_joint_state_topic: /detector/current_joint_state
+    objects_ik_topic: /detector/objects_ik_json
+    robot_status_topic: /robot/inspection_status

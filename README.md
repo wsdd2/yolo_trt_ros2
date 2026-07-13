@@ -1,23 +1,23 @@
-# yolo_trt_ros2
+# H2 ROS Perception
 
-这是一个面向 ROS2 Foxy/Humble 的轻量级 YOLO 检测 ROS 包，目标是在 Unitree G1/H2 的 NVIDIA Jetson Orin NX 上运行，用于机器人任务中的 2D 目标检测。
+这是 H2 开门任务的 ROS2 感知工作区。当前日常使用链路是：
 
-本包不依赖现成的 `yolo_ros`，也不强依赖 `ultralytics`、`torch` 或 amd64 环境。默认使用 `mock` 后端，用固定假检测框验证 ROS 图像订阅、检测结果发布和 debug image 发布流程。TensorRT 后端预留了接口，但不会在 `mock` 模式下导入 TensorRT。
+```text
+RealSense -> YOLOE/蓝点检测 -> 深度投影 -> 手眼/FK -> Dex1 补偿目标 -> ROS topics + Web dashboard
+```
 
-## 目标平台
+当前 H2 部署信息：
 
-- 机器人：Unitree G1 / H2
-- 计算平台：NVIDIA Jetson Orin NX
-- 系统：Ubuntu 20.04 / 22.04
-- ROS：ROS2 Foxy
-- 架构：aarch64 / arm64
-- JetPack / L4T：R35.3.1
-- CUDA：<= 13.0
-- TensorRT：8.5.2
+```text
+H2 IP: 192.168.25.189
+H2 workspace: /home/unitree/MscapeTech/Foxy_ROS
+ROS: Humble
+Main config: /home/unitree/MscapeTech/Foxy_ROS/src/yolo_trt_ros2/config/inspection_perception.yaml
+Web dashboard: http://192.168.25.189:8080/
+Main robot-facing output: /detector/objects_ik_json
+```
 
 ## 包结构
-
-工作区结构如下：
 
 ```text
 Foxy_ROS/
@@ -26,594 +26,416 @@ Foxy_ROS/
       msg/
         Object2D.msg
         Object2DArray.msg
+        Object3D.msg
+        Object3DArray.msg
+        RobotInspectionStatus.msg
     yolo_trt_ros2/
       config/
-        detector.yaml
+        inspection_perception.yaml
       launch/
-        yolo_detector.launch.py
+        inspection_perception.launch.py
       yolo_trt_ros2/
+        direct_realsense_node.py
         yolo_detector_node.py
+        coordinate_projector_node.py
+        web_dashboard_node.py
         backends/
-          mock_backend.py
-          tensorrt_backend.py
+          ultralytics_backend.py
 ```
 
-`detector_msgs` 提供简单的 2D 检测消息：
+## 日常启动
 
-- `Object2D.msg`：单个目标，包括类别、置信度、bbox 和中心点。
-- `Object2DArray.msg`：带 `std_msgs/Header` 的目标数组。
-
-`yolo_trt_ros2` 提供检测节点：
-
-- 订阅图像：`/camera/color/image_raw`
-- 发布检测结果：`/detector/objects`
-- 发布调试图像：`/detector/debug_image`
-
-## 依赖安装
-
-先确保已经安装并配置 ROS2 Foxy，然后安装常用依赖：
+在 H2 上运行：
 
 ```bash
-sudo apt update
-sudo apt install -y \
-  ros-foxy-rclpy \
-  ros-foxy-sensor-msgs \
-  ros-foxy-std-msgs \
-  ros-foxy-cv-bridge \
-  ros-foxy-rosidl-default-generators \
-  ros-foxy-rosidl-default-runtime \
-  python3-opencv \
-  python3-numpy \
-  python3-colcon-common-extensions
+cd ~/MscapeTech/Foxy_ROS
+
+conda deactivate 2>/dev/null || true
+unset PYTHONPATH
+unset LD_LIBRARY_PATH
+
+source /opt/ros/humble/setup.bash
+source install/setup.bash
+
+export ROS_DOMAIN_ID=42
+export ROS_DISABLE_DAEMON=1
+export RMW_IMPLEMENTATION=rmw_fastrtps_cpp
+
+ros2 launch yolo_trt_ros2 inspection_perception.launch.py \
+  config_file:=/home/unitree/MscapeTech/Foxy_ROS/src/yolo_trt_ros2/config/inspection_perception.yaml \
+  use_direct_camera:=true
 ```
 
-如果需要查看 debug image，可以安装：
+打开网页：
 
-```bash
-sudo apt install -y ros-foxy-rqt-image-view ros-foxy-image-view
+```text
+http://192.168.25.189:8080/
 ```
 
-## 编译方法
+注意：
 
-进入工作区根目录：
+- 不要在 conda 环境里启动 ROS。
+- 不要手动设置 Unitree SDK 的 `PYTHONPATH`；节点内部已经处理。
+- `\` 后面不要有空格。
+- 如果 RealSense 报 `Device or resource busy`，通常是已有 direct/ROS/直连脚本占用了相机。
+
+## 同步和重建
+
+从本机 WSL 同步整个 ROS 工作区到 H2：
 
 ```bash
-cd ~/Foxy_ROS
-source /opt/ros/foxy/setup.bash
-colcon build --symlink-install
+rsync -av --progress \
+  --exclude build \
+  --exclude install \
+  --exclude log \
+  --exclude __pycache__ \
+  --exclude '*.pyc' \
+  /mnt/e/MscapeTech/Foxy_ROS/ \
+  unitree@192.168.25.189:/home/unitree/MscapeTech/Foxy_ROS/
 ```
 
-如果你把 `src/detector_msgs` 和 `src/yolo_trt_ros2` 放到了已有的 ROS2 工作区，例如 `~/ros2_ws`：
+H2 上重建：
 
 ```bash
-cd ~/ros2_ws
-source /opt/ros/foxy/setup.bash
-colcon build --symlink-install
-```
+cd ~/MscapeTech/Foxy_ROS
 
-## Source 方法
+conda deactivate 2>/dev/null || true
+unset PYTHONPATH
+unset LD_LIBRARY_PATH
 
-每次打开新终端后：
+source /opt/ros/humble/setup.bash
 
-```bash
-source /opt/ros/foxy/setup.bash
+rm -rf build/detector_msgs install/detector_msgs build/yolo_trt_ros2 install/yolo_trt_ros2
+colcon build --packages-select detector_msgs yolo_trt_ros2
+
 source install/setup.bash
 ```
 
-也可以把 source 命令加入 `~/.bashrc`，但开发阶段建议手动 source，避免多个工作区互相影响。
-
-## 启动方法
-
-默认使用 `config/detector.yaml`，其中 `backend` 为 `mock`：
+如果只改了 `yolo_trt_ros2` Python 代码或 YAML，通常只需要：
 
 ```bash
-ros2 launch yolo_trt_ros2 yolo_detector.launch.py
+rm -rf build/yolo_trt_ros2 install/yolo_trt_ros2
+colcon build --packages-select yolo_trt_ros2
 ```
 
-使用自定义配置文件：
+如果改了 `detector_msgs/msg/*.msg`，必须同时重建 `detector_msgs` 和 `yolo_trt_ros2`。
 
-```bash
-ros2 launch yolo_trt_ros2 yolo_detector.launch.py config_file:=/path/to/detector.yaml
+## 主要输出 Topic
+
+```text
+/detector/objects
+  detector_msgs/msg/Object2DArray
+  2D 检测结果，包括蓝点、把手检测框，以及把手端点像素字段。
+
+/detector/objects_3d
+  detector_msgs/msg/Object3DArray
+  3D 目标结果。point_target 已经对齐直连脚本的 copy target 语义。
+
+/detector/target_point
+  geometry_msgs/msg/PointStamped
+  当前最佳目标点。
+
+/detector/target_pose
+  geometry_msgs/msg/PoseStamped
+  当前最佳目标位姿。
+
+/detector/target_joint_state
+  sensor_msgs/msg/JointState
+  ROS IK 给出的目标关节角建议。
+
+/detector/current_joint_state
+  sensor_msgs/msg/JointState
+  从 Unitree lowstate 读取的当前关节角。
+
+/detector/objects_ik_json
+  std_msgs/msg/String
+  推荐给机器人工程师订阅的主输出。
+
+/robot/inspection_status
+  detector_msgs/msg/RobotInspectionStatus
+  机器人侧发布的状态，视觉侧订阅并合并到 JSON 和网页。
 ```
 
-## 参数说明
+## 坐标和补偿语义
 
-默认配置在 `config/detector.yaml`：
+当前 ROS 输出已经和直连脚本对齐。
+
+关键配置在 `inspection_perception.yaml`：
 
 ```yaml
-yolo_detector:
+coordinate_projector:
   ros__parameters:
-    image_topic: /camera/color/image_raw
-    objects_topic: /detector/objects
-    debug_image_topic: /detector/debug_image
-    engine_path: ''
-    class_names_path: ''
-    input_width: 640
-    input_height: 640
-    conf_thres: 0.25
-    iou_thres: 0.45
-    publish_debug_image: true
-    backend: mock
+    handeye_mode: eye-in-hand
+    handeye_target_frame: pelvis
+    base_link: pelvis
+    hand_link: right_wrist_yaw_link
+    fk_backend: xr_pinocchio
+    lock_waist: true
+
+    handeye_mount_offset_from_wrist_xyz: [0.05, 0.0, 0.0]
+    dex1_tip_from_wrist_xyz: [0.14, 0.01, 0.012]
+    blue_point_target_world_offset_xyz: [0.0, 0.0, -0.004]
 ```
 
-主要参数：
+含义：
 
-- `image_topic`：输入图像 topic。
-- `objects_topic`：检测结果 topic。
-- `debug_image_topic`：带检测框的调试图像 topic。
-- `engine_path`：TensorRT engine 路径，只有 `backend=tensorrt` 时使用。
-- `class_names_path`：类别名称文件路径，每行一个类别。
-- `input_width` / `input_height`：模型输入尺寸，默认 640x640。
-- `conf_thres`：置信度阈值。
-- `iou_thres`：NMS IoU 阈值。
-- `publish_debug_image`：是否发布 debug image。
-- `backend`：后端类型，当前支持 `mock` 和预留的 `tensorrt`。
+- `dex1_tip_from_wrist_xyz` 是 Dex1-1 指尖/接触点相对 `right_wrist_yaw_link` 的实测偏移。
+- 蓝点会额外加 `blue_point_target_world_offset_xyz`，当前是世界 Z 方向向下 4mm。
+- `/detector/objects_3d[].point_target` 和网页复制点位是“机械臂可直接执行的目标点”，等价于直连脚本里的 `preferred_copy_target / ree_target_for_dex1_tip`。
+- ROS 内部 IK 使用 `handeye_mount_offset_from_wrist_xyz`，避免对已经补偿后的 copy target 再扣一次 Dex1 偏移。
 
-## 查看 Topic
+## 任务字段
 
-启动节点后，查看 topic：
-
-```bash
-ros2 topic list
-```
-
-查看检测结果：
-
-```bash
-ros2 topic echo /detector/objects
-```
-
-查看发布频率：
-
-```bash
-ros2 topic hz /detector/objects
-ros2 topic hz /detector/debug_image
-```
-
-## 查看 Debug Image
-
-使用 `rqt_image_view`：
-
-```bash
-rqt_image_view /detector/debug_image
-```
-
-或使用 `image_view`：
-
-```bash
-ros2 run image_view image_view --ros-args -r image:=/detector/debug_image
-```
-
-## Mock 检测测试
-
-`mock` 后端会在每帧输入图像上生成一个固定假检测框，用来验证 ROS 管线是否通畅。
-
-测试步骤：
-
-1. 启动相机或任意图像发布节点，确保有 `sensor_msgs/msg/Image` 发布到 `/camera/color/image_raw`。
-2. 启动检测节点：
-
-```bash
-ros2 launch yolo_trt_ros2 yolo_detector.launch.py
-```
-
-3. 查看检测结果：
-
-```bash
-ros2 topic echo /detector/objects
-```
-
-正常情况下会看到类似结果：
+推荐机器人侧订阅：
 
 ```text
-class_name: cabinet_door
-class_id: 0
-confidence: 0.9
-xmin: ...
-ymin: ...
-xmax: ...
-ymax: ...
-cx: ...
-cy: ...
+/detector/objects_ik_json
 ```
 
-4. 查看调试图像：
-
-```bash
-rqt_image_view /detector/debug_image
-```
-
-如果能看到绿色检测框，说明图像订阅、OpenCV 转换、检测结果发布和 debug image 发布流程都已经跑通。
-
-## TensorRT 后端说明
-
-`yolo_trt_ros2/backends/tensorrt_backend.py` 目前只预留接口，避免影响 `mock` 模式运行。TensorRT 相关 Python API 采用 lazy import，只有在配置 `backend: tensorrt` 时才会尝试导入。
-
-后续实现 TensorRT 后端时，应保持统一接口：
-
-```python
-detections = backend.infer(bgr_image)
-```
-
-其中 `detections` 是 `list[dict]`，每个字典包含：
+消息类型：
 
 ```text
-class_name, class_id, confidence, xmin, ymin, xmax, ymax
+std_msgs/msg/String
 ```
 
-后续可补充的 TensorRT 工作：
-
-- 反序列化 `.engine` 文件。
-- 分配 CUDA host/device buffer。
-- 将 OpenCV BGR 图像预处理成模型输入。
-- 执行 TensorRT inference。
-- 解码 YOLO 输出。
-- 执行 NMS。
-- 输出统一 detection 字典格式。
-
-## 注意事项
-
-- 不使用 ROS2 Humble/Jazzy 才有的新 API。
-- Python 代码兼容 ROS2 Foxy 常见的 Python 3.8 环境。
-- 默认 `mock` 模式不需要 TensorRT、Torch 或 Ultralytics。
-- 在 Jetson 上部署 TensorRT 时，需要保证 TensorRT Python bindings 与 JetPack/L4T 版本匹配。
-
-## 远程宿主机与 Docker 测试记录
-
-本节记录在 Unitree G1 Jetson Orin NX 远程宿主机和已有 Docker 容器中跑通 `mock` 检测管线的实际流程。
-
-远程宿主机：
+JSON 中常用字段：
 
 ```text
-unitree@192.168.1.96
+objects[].class_name
+objects[].object_id
+objects[].point_target
+objects[].ik.success
+objects[].ik.joint_values_rad
+objects[].handle_grasp_endpoint_targets_m
+objects[].handle_mid_right_air_target_m
+robot_status
 ```
 
-进入已有容器：
+### Stage 2: 戳蓝点
+
+找：
+
+```text
+class_name == "blue push point"
+```
+
+读：
+
+```text
+object.point_target
+```
+
+如果 `object.ik.success == true`，也可以直接用：
+
+```text
+object.ik.joint_values_rad
+```
+
+### Stage 3: 推/拉弹起把手
+
+把手检测有两套输出：
+
+```text
+handle_grasp_endpoint_targets_m
+```
+
+把手末端夹持线两端，已经做 Dex1 补偿。网页上黄/红端点 marker 双击复制对应点。
+
+```text
+handle_mid_right_air_target_m
+```
+
+把手中段右侧空气中的目标点，默认从把手中段向图像右方向偏移 1cm，再做 Dex1 补偿。机器人可先到这个点，然后执行向左推/拉动作。
+
+对应配置：
+
+```yaml
+handle_mid_right_offset_m: 0.01
+```
+
+深度 fallback 会在只检测到蓝点、没检测到小把手框时，根据蓝点左侧的深度前景估计把手端点和中段：
+
+```yaml
+handle_depth_grasp_fallback: true
+handle_depth_search_left_px: 360
+handle_depth_search_right_px: 18
+handle_depth_search_y_px: 70
+handle_depth_near_delta_m: 0.015
+handle_depth_max_blue_distance_px: 180.0
+handle_depth_sticky_px: 45.0
+```
+
+## 网页使用
+
+```text
+http://192.168.25.189:8080/
+```
+
+网页元素：
+
+- 蓝点框：蓝色按钮目标。
+- 黄/红小方块：把手端点，双击复制对应 `handle_grasp_endpoint_targets_m[i]`。
+- 青色小方块：把手中段右侧空气点，双击复制 `handle_mid_right_air_target_m`。
+- 双击目标框：优先复制 `handle_mid_right_air_target_m`；没有该字段时复制把手中心或普通目标点。
+
+## 快速检查
+
+另开一个 H2 终端：
 
 ```bash
-sudo docker exec -it wsdd_test /bin/bash
+cd ~/MscapeTech/Foxy_ROS
+source /opt/ros/humble/setup.bash
+source install/setup.bash
+export ROS_DOMAIN_ID=42
+export ROS_DISABLE_DAEMON=1
+export RMW_IMPLEMENTATION=rmw_fastrtps_cpp
 ```
 
-### 从本机传输工作区
-
-如果在 Windows PowerShell 中传输：
-
-```powershell
-scp -r E:\MscapeTech\Foxy_ROS unitree@192.168.1.96:~/tmp/
-```
-
-如果在 WSL 终端中传输，`E:\MscapeTech` 要写成 `/mnt/e/MscapeTech`：
+检查节点：
 
 ```bash
-scp -r /mnt/e/MscapeTech/Foxy_ROS unitree@192.168.1.96:~/tmp/
-```
-
-如果远程宿主机上只出现了 `~/tmp/src`，可以手动整理成 ROS2 workspace：
-
-```bash
-cd ~/tmp
-mkdir -p Foxy_ros
-mv src Foxy_ros/
-ls Foxy_ros/src
+ros2 node list
 ```
 
 应看到：
 
 ```text
-detector_msgs  yolo_trt_ros2
+/direct_realsense
+/yolo_detector
+/coordinate_projector
+/web_dashboard
 ```
 
-注意 `~/tmp/Foxy_ros` 的真实路径是 `/home/unitree/tmp/Foxy_ros`，不是 `/tmp/Foxy_ros`。拷贝进 Docker 时使用宿主机真实路径：
+检查相机：
 
 ```bash
-sudo docker exec wsdd_test mkdir -p /foxy_ros_custom
-sudo docker cp /home/unitree/tmp/Foxy_ros/. wsdd_test:/foxy_ros_custom/
+ros2 topic echo --once /camera/color/camera_info
+ros2 topic hz /camera/color/image_raw
+ros2 topic hz /camera/aligned_depth_to_color/image_raw
 ```
 
-### 容器内编译
-
-进入容器：
+检查感知：
 
 ```bash
-sudo docker exec -it wsdd_test /bin/bash
+ros2 topic echo --once /detector/objects
+ros2 topic echo --once /detector/objects_3d
+ros2 topic echo --once /detector/objects_ik_json --field data
 ```
 
-编译：
+检查关节：
 
 ```bash
-cd /foxy_ros_custom
-source /opt/ros/foxy/setup.bash
-colcon build --symlink-install
+ros2 topic echo --once /detector/current_joint_state
+ros2 topic echo --once /detector/target_joint_state
+```
+
+## 机器人状态输入
+
+机器人侧可以发布：
+
+```text
+/robot/inspection_status
+detector_msgs/msg/RobotInspectionStatus
+```
+
+Stage 约定：
+
+```text
+0 idle
+1 move_to_handle_front
+2 press_blue_point
+3 push_or_pull_handle
+4 door_opened
+5 recover_or_abort
+```
+
+示例：
+
+```bash
+ros2 topic pub --once /robot/inspection_status detector_msgs/msg/RobotInspectionStatus "{
+  header: {frame_id: 'pelvis'},
+  stage_id: 2,
+  stage_name: 'press_blue_point',
+  current_action: 'moving_to_blue_button',
+  motion_active: true,
+  progress: 0.45,
+  has_error: false,
+  error_code: '',
+  error_message: '',
+  emergency_stop: false,
+  target_reachable: true,
+  reachability_message: 'ik ok',
+  target_id: '00_blue_push_point'
+}"
+```
+
+该状态会出现在：
+
+```text
+/detector/objects_ik_json -> robot_status
+http://192.168.25.189:8080/api/state -> robot_status
+```
+
+## 示例脚本
+
+```text
+Foxy_ROS/examples/
+```
+
+机器人订阅感知示例：
+
+```bash
+python3 examples/robot_subscribe_perception_example.py
+```
+
+机器人发布状态示例：
+
+```bash
+python3 examples/robot_publish_status_example.py \
+  --stage 2 \
+  --action moving_to_blue_button \
+  --active \
+  --progress 0.45 \
+  --reachable true \
+  --target-id 00_blue_push_point
+```
+
+## 常见问题
+
+### Package not found
+
+通常是没有 source 工作区：
+
+```bash
+source /opt/ros/humble/setup.bash
+source ~/MscapeTech/Foxy_ROS/install/setup.bash
+```
+
+### 话题看不到
+
+确认当前终端和 launch 终端一致：
+
+```bash
+export ROS_DOMAIN_ID=42
+export ROS_DISABLE_DAEMON=1
+export RMW_IMPLEMENTATION=rmw_fastrtps_cpp
+```
+
+### RealSense busy
+
+检查是否已有进程占用相机：
+
+```bash
+ps -eo pid,ppid,stat,cmd | grep -E 'direct_realsense|run_h2_handle_pose_direct|realsense' | grep -v grep
+for d in /dev/video*; do [ -e "$d" ] && fuser -v "$d" 2>&1; done
+```
+
+### 修改 msg 后报字段不存在
+
+重建两个包：
+
+```bash
+rm -rf build/detector_msgs install/detector_msgs build/yolo_trt_ros2 install/yolo_trt_ros2
+colcon build --packages-select detector_msgs yolo_trt_ros2
 source install/setup.bash
 ```
-
-如果缺少 OpenCV、`cv_bridge` 或测试图像工具：
-
-```bash
-apt update
-apt install -y \
-  python3-opencv \
-  python3-numpy \
-  ros-foxy-cv-bridge \
-  ros-foxy-image-tools
-```
-
-### 避免 conda 环境污染
-
-ROS2 Foxy 通常使用系统 Python 3.8。Unitree 容器里可能存在 `unitree_sdk_py310` 或 `unitree_dds_py310` 这类 conda 环境，直接在 Python 3.10 conda 环境里运行 ROS2 Foxy 节点，可能导致 `cv2`、`rclpy`、`cv_bridge`、DDS 或动态库冲突。
-
-启动 ROS2 节点前建议退出 conda 并清理关键变量：
-
-```bash
-conda deactivate 2>/dev/null || true
-unset PYTHONPATH
-unset LD_LIBRARY_PATH
-source /opt/ros/foxy/setup.bash
-source /foxy_ros_custom/install/setup.bash
-```
-
-检查 Python 环境：
-
-```bash
-which python3
-python3 --version
-python3 -c "import cv2; import rclpy; import cv_bridge; print('ros python ok')"
-```
-
-理想情况下，`python3` 应来自 `/usr/bin/python3`。
-
-### DDS 与 ROS2 daemon 排查
-
-如果出现：
-
-```text
-bad_alloc caught: std::bad_alloc
-Failed to confirm that the daemon started successfully
-Killed
-```
-
-不一定是内存不足。先检查：
-
-```bash
-free -h
-```
-
-如果可用内存充足，优先怀疑 ROS2 daemon、RMW 或容器 DDS 环境。可以绕过 daemon，并固定 ROS domain 和 RMW：
-
-```bash
-export ROS_DOMAIN_ID=42
-export RMW_IMPLEMENTATION=rmw_fastrtps_cpp
-export ROS_DISABLE_DAEMON=1
-```
-
-部分 Foxy 版本的 `ros2 topic echo` 不支持 `--once`，直接使用：
-
-```bash
-ros2 topic echo /detector/objects
-```
-
-看到消息后按 `Ctrl+C` 停止。也可以用：
-
-```bash
-timeout 5 ros2 topic echo /detector/objects
-```
-
-如果 FastDDS 不稳定，可以尝试 CycloneDDS：
-
-```bash
-apt update
-apt install -y ros-foxy-rmw-cyclonedds-cpp
-export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
-```
-
-Docker 中 DDS 还可能受 `/dev/shm` 限制影响。如果后续新建测试容器，建议使用：
-
-```bash
---net=host --ipc=host
-```
-
-或至少：
-
-```bash
---net=host --shm-size=1g
-```
-
-### 无真实相机时的 mock 测试
-
-`image_tools cam2image` 默认会尝试打开 `/dev/video0`。如果容器没有挂载真实相机，会报：
-
-```text
-Could not open video stream
-```
-
-这不是检测节点问题。测试 `mock` 管线时可以用一个临时 Python 节点发布纯色图像：
-
-```bash
-cat > /tmp/pub_test_image.py <<'PY'
-import rclpy
-from rclpy.node import Node
-from sensor_msgs.msg import Image
-
-class PubImage(Node):
-    def __init__(self):
-        super().__init__('pub_test_image')
-        self.pub = self.create_publisher(Image, '/camera/color/image_raw', 10)
-        self.timer = self.create_timer(0.2, self.tick)
-
-    def tick(self):
-        w, h = 640, 480
-        msg = Image()
-        msg.header.stamp = self.get_clock().now().to_msg()
-        msg.header.frame_id = 'camera_color_optical_frame'
-        msg.height = h
-        msg.width = w
-        msg.encoding = 'bgr8'
-        msg.is_bigendian = 0
-        msg.step = w * 3
-        msg.data = bytes([40, 80, 160]) * (w * h)
-        self.pub.publish(msg)
-
-rclpy.init()
-node = PubImage()
-rclpy.spin(node)
-PY
-```
-
-推荐开三个容器终端测试。
-
-终端 1：启动检测节点：
-
-```bash
-cd /foxy_ros_custom
-source /opt/ros/foxy/setup.bash
-source install/setup.bash
-export ROS_DOMAIN_ID=42
-export RMW_IMPLEMENTATION=rmw_fastrtps_cpp
-export ROS_DISABLE_DAEMON=1
-ros2 launch yolo_trt_ros2 yolo_detector.launch.py
-```
-
-终端 2：发布测试图像：
-
-```bash
-source /opt/ros/foxy/setup.bash
-source /foxy_ros_custom/install/setup.bash
-export ROS_DOMAIN_ID=42
-export RMW_IMPLEMENTATION=rmw_fastrtps_cpp
-export ROS_DISABLE_DAEMON=1
-python3 /tmp/pub_test_image.py
-```
-
-终端 3：查看检测结果：
-
-```bash
-source /opt/ros/foxy/setup.bash
-source /foxy_ros_custom/install/setup.bash
-export ROS_DOMAIN_ID=42
-export RMW_IMPLEMENTATION=rmw_fastrtps_cpp
-export ROS_DISABLE_DAEMON=1
-ros2 topic echo /detector/objects
-```
-
-正常情况下会看到 `mock` 后端发布的假检测框：
-
-```text
-class_name: cabinet_door
-class_id: 0
-confidence: 0.9
-xmin: ...
-ymin: ...
-xmax: ...
-ymax: ...
-cx: ...
-cy: ...
-```
-
-如果后续接真实相机，需要在创建容器时挂载设备，例如 `--device=/dev/video0`，并先在宿主机确认 `/dev/video0` 存在。
-
-## 电柜巡检 YOLO + ROS2 Foxy 通信
-
-这个工作区现在包含两层感知通信：
-
-- `yolo_detector_node`：订阅 RGB 图像，发布 2D 检测框。
-- `coordinate_projector_node`：订阅 2D 检测、对齐深度图和 `CameraInfo`，发布相机系/目标系 3D 坐标。
-
-Unitree H2 上的部署流程、命令集和基准测试见：
-
-```text
-H2_DEPLOYMENT_AND_BENCHMARK.md
-```
-
-### 主要 Topic
-
-输入：
-
-- `/camera/color/image_raw`：RGB 图像，`sensor_msgs/Image`
-- `/camera/aligned_depth_to_color/image_raw`：对齐到 RGB 的深度图，`sensor_msgs/Image`
-- `/camera/color/camera_info`：RGB 相机内参，`sensor_msgs/CameraInfo`
-
-输出：
-
-- `/detector/objects`：2D 检测结果，`detector_msgs/Object2DArray`
-- `/detector/debug_image`：带框调试图，`sensor_msgs/Image`
-- `/detector/objects_3d`：每个检测目标的 3D 坐标，`detector_msgs/Object3DArray`
-- `/detector/target_point`：当前最佳目标点，`geometry_msgs/PointStamped`
-- `/detector/target_pose`：当前最佳目标位姿，`geometry_msgs/PoseStamped`
-- `/detector/target_joint_state`：当前最佳目标的 IK 目标关节角建议值，`sensor_msgs/JointState`
-
-网页：
-
-- `http://<H2-IP>:8080/`：实时网页面板，显示 `/detector/debug_image`、2D 检测、3D 目标、位姿和 IK 关节角。
-- `http://<H2-IP>:8080/stream.mjpg`：MJPEG 视频流。
-- `http://<H2-IP>:8080/api/state`：实时 JSON 状态。
-
-### 启动
-
-在 Jetson / Docker 的 Foxy 环境中：
-
-```bash
-cd /foxy_ros_custom
-source /opt/ros/foxy/setup.bash
-colcon build --symlink-install
-source install/setup.bash
-ros2 launch yolo_trt_ros2 inspection_perception.launch.py
-```
-
-默认配置文件是：
-
-```text
-src/yolo_trt_ros2/config/inspection_perception.yaml
-```
-
-如果权重不在默认路径 `/foxy_ros_custom/models/yoloe-11s-seg.pt`，改这个参数：
-
-```yaml
-yolo_detector:
-  ros__parameters:
-    model_path: /your/path/yoloe-11s-seg.pt
-```
-
-### 坐标系
-
-默认 `target_frame: ''`，因此 `/detector/target_point` 和 `/detector/target_pose` 使用相机光学坐标系，也就是检测图像 header 里的 `frame_id`。
-
-如果已经有 `eye-to-hand` 手眼标定结果，例如 `T_cam2base.npy`，可以直接让节点加载 4x4 矩阵，把相机坐标转换成机器人基座/世界坐标：
-
-```yaml
-coordinate_projector:
-  ros__parameters:
-    handeye_npy_path: /foxy_ros_custom/outputs/eye_to_hand_xxx_npy/T_cam2base.npy
-    handeye_target_frame: base_link
-```
-
-`handeye_npy_path` 也可以指向包含 `T_cam2base.npy` 的目录。启用后：
-
-- `Object3D.point_camera`：原始相机坐标，单位 m。
-- `Object3D.point_target`：经过 `.npy` 矩阵转换后的 `base_link` / 世界坐标，单位 m。
-- `/detector/target_point` 和 `/detector/target_pose` 的 `header.frame_id` 会使用 `handeye_target_frame`。
-
-如果已经有手眼标定 TF，例如 `base_link <- camera_color_optical_frame`，可以设置：
-
-```yaml
-coordinate_projector:
-  ros__parameters:
-    target_frame: base_link
-```
-
-这样 `Object3D.point_camera` 保留相机系坐标，`Object3D.point_target` 和 `/detector/target_point` 输出 `base_link` 坐标。
-
-注意：如果你的标定文件是 `eye-in-hand` 的 `T_cam2hand.npy`，单独这个矩阵只能得到末端/手腕坐标；要得到世界/基座坐标，还需要实时 FK 或 TF 提供当前 `T_base_hand`。H2 正式配置会从 `rt/lowstate` 读取当前关节，结合 `/home/unitree/MscapeTech/Hand_Eye_Calib/outputs/eye_in_hand_20260630_150210.json` 自动加载同名 `_npy/T_cam2hand.npy`，输出 `torso_link` 下的 3D 目标，并可发布 `/detector/target_joint_state` 给运控侧做安全校验和执行决策。
-
-### 快速检查
-
-```bash
-ros2 topic echo /detector/objects
-ros2 topic echo /detector/objects_3d
-ros2 topic echo /detector/target_point
-ros2 topic echo /detector/target_joint_state
-ros2 topic hz /detector/debug_image
-```
-
-启动 `inspection_perception.launch.py` 后，网页面板会随 `web_dashboard_node` 一起启动。H2 宿主机默认监听 `0.0.0.0:8080`，局域网内浏览器访问 `http://<H2-IP>:8080/` 即可。
-
-如果只想先验证 ROS 通信，把配置里的 `backend` 改为 `mock`，无需安装 `ultralytics` 或加载真实模型。

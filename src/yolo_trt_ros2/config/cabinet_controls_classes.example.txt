@@ -1,0 +1,24 @@
+# Electrical cabinet YOLOE prompts for Foxy_ROS / direct H2.
+# Copy to config/private/yoloe_classes.txt (or point yoloe_classes_path here).
+# Set prompt_free: false in the detector yaml.
+#
+# Canonical publish classes (normalized by cabinet_controls / future ROS node):
+#   indicator_light, analog_meter, digital_meter, rotary_switch,
+#   rocker_switch, toggle_switch, pressure_gauge, label
+
+red indicator light
+green indicator light
+yellow indicator light
+black indicator light
+square analog ammeter
+square analog voltmeter
+digital panel meter
+black digital display
+black rotary selector switch
+rotary knob with pointer
+black rocker switch
+yellow toggle switch
+red toggle switch
+white toggle switch
+round pressure gauge
+circular analog gauge

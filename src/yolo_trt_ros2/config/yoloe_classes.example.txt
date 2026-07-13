@@ -3,8 +3,23 @@
 #
 # One class/prompt per line, or comma-separated. Lines starting with # are ignored.
 # Keep the private file out of git; config/private/ is ignored by .gitignore.
+#
+# Handle profile (legacy):
+#   cabinet door handle
+#   push button
+#
+# Cabinet multi-control profile: prefer cabinet_controls_classes.example.txt
 
-cabinet door handle
-push button
-selector knob
-control panel switch
+red indicator light
+green indicator light
+yellow indicator light
+black indicator light
+square analog ammeter
+square analog voltmeter
+digital panel meter
+black rotary selector switch
+black rocker switch
+yellow toggle switch
+red toggle switch
+white toggle switch
+round pressure gauge
