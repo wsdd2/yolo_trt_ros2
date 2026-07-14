@@ -19,9 +19,15 @@ yolo_detector:
     prompt_free: false
     best_handle_only: false
     detect_blue_point: false
-    blue_point_class_name: blue push point
+    blue_point_class_name: red sticker push point
+    press_point_mode: red_sticker
+    press_point_vertical_ratio: 0.50
     blue_point_min_area: 40.0
     blue_point_max_area_ratio: 0.02
+    roi_mean_filter_enabled: false
+    roi_mean_filter_window: 3
+    roi_mean_filter_max_jump_px: 40.0
+    roi_mean_filter_max_missed: 2
     prompts: 'lever door handle,horizontal door handle,door lever handle,pull door handle'
     backend: mock
 
@@ -34,6 +40,8 @@ coordinate_projector:
     target_point_topic: /detector/target_point
     target_pose_topic: /detector/target_pose
     target_joint_state_topic: /detector/target_joint_state
+    current_ee_point_topic: /detector/current_ee_point
+    press_point_ground_ratio: 0.80
     target_frame: ''
     handeye_mode: eye-to-hand
     handeye_npy_path: ''
@@ -87,3 +95,4 @@ web_dashboard:
     target_point_topic: /detector/target_point
     target_pose_topic: /detector/target_pose
     target_joint_state_topic: /detector/target_joint_state
+    current_ee_point_topic: /detector/current_ee_point

@@ -187,7 +187,7 @@ Button workflow:
 ```text
 1. Move arm to initial pose.
 2. Subscribe /detector/objects_ik_json.
-3. Find object where class_name == "blue push point".
+3. Find object where class_name == "red sticker push point".
 4. Read object.point_target as the button target in pelvis frame.
 5. If object.ik.success is true, use object.ik.joint_values_rad directly.
 ```
@@ -199,7 +199,7 @@ def on_msg(msg):
     data = json.loads(msg.data)
 
     for obj in data["objects"]:
-        if obj["class_name"] == "blue push point":
+        if obj["class_name"] == "red sticker push point":
             button_xyz = obj["point_target"]  # pelvis frame
             ik = obj.get("ik") or {}
 
@@ -219,7 +219,7 @@ detector_msgs/msg/Object3DArray
 Find:
 
 ```text
-object.detection.class_name == "blue push point"
+object.detection.class_name == "red sticker push point"
 ```
 
 Read:

@@ -16,6 +16,7 @@ setup(
         ('share/' + package_name + '/config', [
             'config/detector.yaml',
             'config/inspection_perception.yaml',
+            'config/cabinet_controls_classes.txt',
             'config/yoloe_classes.example.txt',
         ]),
     ],

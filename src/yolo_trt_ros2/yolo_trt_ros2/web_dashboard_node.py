@@ -291,6 +291,12 @@ INDEX_HTML = """<!doctype html>
         </div>
       </section>
       <section>
+        <div class="section-head"><span>current XYZ</span><span id="currentXyzMeta" class="mono">--</span></div>
+        <div class="content">
+          <div id="currentXyz" class="kv" title="click to copy current XYZ"></div>
+        </div>
+      </section>
+      <section>
         <div class="section-head"><span>IK joint state</span><span id="jointMeta" class="mono">--</span></div>
         <div class="content">
           <table>
@@ -357,12 +363,22 @@ INDEX_HTML = """<!doctype html>
     function coordText(obj) {
       const p = obj.point_torso_m;
       if (!p) return "world unavailable";
-      return `[${p.map(v => fmt(v, 4)).join(", ")}]`;
+      return p.map(v => fmt(v, 4)).join(" ");
     }
 
     function xyzText(values) {
       if (!values || values.length !== 3) return "";
       return values.map(v => fmt(v, 4)).join(" ");
+    }
+
+    function isBluePress(obj) {
+      const name = String(
+        (obj && (obj.class_name || (obj.detection && obj.detection.class_name))) || ""
+      ).toLowerCase();
+      return name.includes("blue") ||
+        name.includes("circle push point") ||
+        name.includes("white square push point") ||
+        name.includes("red sticker push point");
     }
 
     function ikText(obj) {
@@ -372,6 +388,10 @@ INDEX_HTML = """<!doctype html>
     }
 
     async function copyText(text) {
+      text = String(text)
+        .replace(/[\\[\\],]/g, " ")
+        .trim()
+        .replace(/\\s+/g, " ");
       if (navigator.clipboard && window.isSecureContext) {
         await navigator.clipboard.writeText(text);
         return;
@@ -427,8 +447,13 @@ INDEX_HTML = """<!doctype html>
         div.addEventListener("mousemove", ev => {
           const tooltip = document.getElementById("tooltip");
           if (stable) {
+            const copyHint = isBluePress(obj)
+              ? "click to copy blue press target"
+              : ((obj.handle_mid_right_air_target_m || obj.handle_grasp_ree_target_m)
+                  ? "click to copy explicit handle grasp target"
+                  : "no action target (object center is diagnostic only)");
             tooltip.textContent =
-              `${label.textContent}\\nworld ${coordText(obj)}\\n${obj.message || ""}\\n${ikText(obj)}\\nclick to copy world`;
+              `${label.textContent}\\nworld ${coordText(obj)}\\n${obj.message || ""}\\n${ikText(obj)}\\n${copyHint}`;
           } else {
             tooltip.textContent =
               `${label.textContent}\\nstabilizing ${fmt((obj.stable_ms || 0) / 1000, 1)}/3.0s`;
@@ -441,10 +466,15 @@ INDEX_HTML = """<!doctype html>
           document.getElementById("tooltip").style.display = "none";
         });
         div.addEventListener("click", async () => {
-          if (!stable || !obj.point_torso_m) return;
-          const text = obj.handle_mid_right_air_target_m
-            ? xyzText(obj.handle_mid_right_air_target_m)
-            : (obj.handle_grasp_ree_target_m ? xyzText(obj.handle_grasp_ree_target_m) : coordText(obj));
+          if (!stable) return;
+          let text = "";
+          if (isBluePress(obj) && obj.point_torso_m) {
+            text = coordText(obj);
+          } else {
+            const handleTarget = obj.handle_mid_right_air_target_m || obj.handle_grasp_ree_target_m;
+            if (!handleTarget) return;
+            text = xyzText(handleTarget);
+          }
           await copyText(text);
           const copy = document.getElementById("copy");
           copy.textContent = `copied ${text}`;
@@ -452,12 +482,20 @@ INDEX_HTML = """<!doctype html>
         });
         div.addEventListener("dblclick", async ev => {
           ev.stopPropagation();
-          const target = obj.handle_mid_right_air_target_m || obj.handle_grasp_ree_target_m;
-          if (!stable || !target) return;
-          const text = xyzText(target);
+          let text = "";
+          let targetKind = "";
+          if (isBluePress(obj) && obj.point_torso_m) {
+            text = coordText(obj);
+            targetKind = "press target";
+          } else {
+            const target = obj.handle_mid_right_air_target_m || obj.handle_grasp_ree_target_m;
+            if (!target) return;
+            text = xyzText(target);
+            targetKind = "handle target";
+          }
           await copyText(text);
           const copy = document.getElementById("copy");
-          copy.textContent = `copied handle target ${text}`;
+          copy.textContent = `copied ${targetKind} ${text}`;
           setTimeout(() => { copy.textContent = ""; }, 1800);
         });
         overlay.appendChild(div);
@@ -597,7 +635,8 @@ INDEX_HTML = """<!doctype html>
           return tr;
         });
         setRows(document.getElementById("objects2d"), objectRows, 4);
-        const best3d = data.objects3d.objects.find(o => o.valid) || data.objects3d.objects[0];
+        const valid3d = data.objects3d.objects.filter(o => o.valid);
+        const best3d = valid3d.find(o => isBluePress(o)) || valid3d[0] || data.objects3d.objects[0];
         document.getElementById("targetMeta").textContent = best3d ? (best3d.target_frame || "--") : "--";
         if (best3d) {
           kv(document.getElementById("target3d"), [
@@ -621,6 +660,21 @@ INDEX_HTML = """<!doctype html>
         } else {
           kv(document.getElementById("target3d"), []);
         }
+        const currentEe = data.current_ee_point || {};
+        const currentEePoint = currentEe.point || {};
+        document.getElementById("currentXyzMeta").textContent =
+          currentEe.header ? (currentEe.header.frame_id || "--") : "--";
+        if (currentEe.header) {
+          kv(document.getElementById("currentXyz"), [
+            ["link", "right_wrist_yaw_link"],
+            ["xyz", xyzText([currentEePoint.x, currentEePoint.y, currentEePoint.z])],
+            ["frame", currentEe.header.frame_id || "--"],
+            ["stamp", stamp(currentEe.header)],
+            ["copy", "click this panel"]
+          ]);
+        } else {
+          kv(document.getElementById("currentXyz"), []);
+        }
         const jointState = data.target_joint_state.name.length ? data.target_joint_state : data.current_joint_state;
         const jointKind = data.target_joint_state.name.length ? "target" : "current";
         document.getElementById("jointMeta").textContent = `${jointKind} ${jointState.name.length} joints`;
@@ -641,6 +695,15 @@ INDEX_HTML = """<!doctype html>
       }
     }
     window.addEventListener("resize", () => { if (latestData) renderOverlay(latestData); });
+    document.getElementById("currentXyz").addEventListener("click", async () => {
+      const currentEe = latestData && latestData.current_ee_point;
+      if (!currentEe || !currentEe.header || !currentEe.point) return;
+      const text = xyzText([currentEe.point.x, currentEe.point.y, currentEe.point.z]);
+      await copyText(text);
+      const copy = document.getElementById("copy");
+      copy.textContent = `copied current XYZ ${text}`;
+      setTimeout(() => { copy.textContent = ""; }, 1800);
+    });
     setInterval(refresh, 300);
     refresh();
   </script>
@@ -688,6 +751,7 @@ class DashboardState:
         self.target_pose = None
         self.target_joint_state = None
         self.current_joint_state = None
+        self.current_ee_point = None
         self.objects_ik_json = None
         self.robot_status = None
 
@@ -711,6 +775,7 @@ class WebDashboardNode(Node):
         self.target_pose_topic = self.get_parameter('target_pose_topic').value
         self.target_joint_state_topic = self.get_parameter('target_joint_state_topic').value
         self.current_joint_state_topic = self.get_parameter('current_joint_state_topic').value
+        self.current_ee_point_topic = self.get_parameter('current_ee_point_topic').value
         self.objects_ik_topic = self.get_parameter('objects_ik_topic').value
         self.robot_status_topic = self.get_parameter('robot_status_topic').value
 
@@ -725,6 +790,7 @@ class WebDashboardNode(Node):
         self.create_subscription(PoseStamped, self.target_pose_topic, self._target_pose_callback, 10)
         self.create_subscription(JointState, self.target_joint_state_topic, self._joint_state_callback, 10)
         self.create_subscription(JointState, self.current_joint_state_topic, self._current_joint_state_callback, 10)
+        self.create_subscription(PointStamped, self.current_ee_point_topic, self._current_ee_point_callback, 10)
         self.create_subscription(String, self.objects_ik_topic, self._objects_ik_callback, 10)
         self.create_subscription(RobotInspectionStatus, self.robot_status_topic, self._robot_status_callback, 10)
 
@@ -752,6 +818,7 @@ class WebDashboardNode(Node):
         self.declare_parameter('target_pose_topic', '/detector/target_pose')
         self.declare_parameter('target_joint_state_topic', '/detector/target_joint_state')
         self.declare_parameter('current_joint_state_topic', '/detector/current_joint_state')
+        self.declare_parameter('current_ee_point_topic', '/detector/current_ee_point')
         self.declare_parameter('objects_ik_topic', '/detector/objects_ik_json')
         self.declare_parameter('robot_status_topic', '/robot/inspection_status')
 
@@ -802,6 +869,11 @@ class WebDashboardNode(Node):
     def _current_joint_state_callback(self, msg):
         with self.state.lock:
             self.state.current_joint_state = msg
+            self.state.last_update_time = time.time()
+
+    def _current_ee_point_callback(self, msg):
+        with self.state.lock:
+            self.state.current_ee_point = msg
             self.state.last_update_time = time.time()
 
     def _objects_ik_callback(self, msg):
@@ -899,6 +971,7 @@ class WebDashboardNode(Node):
                         'target_pose': pose_stamped_to_dict(state.target_pose),
                         'target_joint_state': joint_state_to_dict(state.target_joint_state),
                         'current_joint_state': joint_state_to_dict(state.current_joint_state),
+                        'current_ee_point': point_stamped_to_dict(state.current_ee_point),
                     }
 
         return DashboardHandler

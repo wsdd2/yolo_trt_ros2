@@ -29,8 +29,8 @@ def generate_launch_description():
     )
     blue_point_offset_arg = DeclareLaunchArgument(
         'blue_point_target_world_offset_xyz',
-        default_value='[0.0, 0.0, -0.004]',
-        description='World-frame offset applied only to blue push point targets, meters.',
+        default_value='[0.0, 0.001, -0.004]',
+        description='World-frame offset applied only to red sticker push point targets, meters.',
     )
     handeye_mount_offset_arg = DeclareLaunchArgument(
         'handeye_mount_offset_from_wrist_xyz',

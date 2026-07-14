@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import os
+from collections import deque
 
 import cv2
 import numpy as np
@@ -41,13 +42,29 @@ class YoloDetectorNode(Node):
         self.mobileclip_path = str(self.get_parameter('mobileclip_path').value)
         self.detect_blue_point = bool(self.get_parameter('detect_blue_point').value)
         self.blue_point_class_name = str(self.get_parameter('blue_point_class_name').value)
+        self.press_point_mode = str(self.get_parameter('press_point_mode').value).strip().lower()
+        self.press_point_vertical_ratio = max(
+            0.0,
+            min(1.0, float(self.get_parameter('press_point_vertical_ratio').value)),
+        )
         self.blue_point_min_area = float(self.get_parameter('blue_point_min_area').value)
         self.blue_point_max_area_ratio = float(self.get_parameter('blue_point_max_area_ratio').value)
+        self.roi_mean_filter_enabled = bool(self.get_parameter('roi_mean_filter_enabled').value)
+        self.roi_mean_filter_window = max(1, int(self.get_parameter('roi_mean_filter_window').value))
+        self.roi_mean_filter_max_jump_px = max(
+            1.0,
+            float(self.get_parameter('roi_mean_filter_max_jump_px').value),
+        )
+        self.roi_mean_filter_max_missed = max(
+            0,
+            int(self.get_parameter('roi_mean_filter_max_missed').value),
+        )
         self.prompts = self._load_yoloe_classes(self.yoloe_classes_path)
         if not self.prompts:
             self.prompts = self._parse_list_value(self.get_parameter('prompts').value)
 
         self.bridge = CvBridge()
+        self._roi_mean_tracks = {'press': [], 'handle': []}
         self.class_names = self._load_class_names(self.class_names_path)
         self.backend = self._create_backend()
 
@@ -57,7 +74,10 @@ class YoloDetectorNode(Node):
             Image,
             self.image_topic,
             self._image_callback,
-            10,
+            # Inference is slower than the camera. A deep queue makes YOLO
+            # process old color frames whose matching depth has already gone.
+            # Keep only the newest frame instead of accumulating latency.
+            1,
         )
 
         self.get_logger().info(
@@ -87,9 +107,15 @@ class YoloDetectorNode(Node):
         self.declare_parameter('filter_prompt_free_handles', False)
         self.declare_parameter('mobileclip_path', '')
         self.declare_parameter('detect_blue_point', False)
-        self.declare_parameter('blue_point_class_name', 'blue push point')
+        self.declare_parameter('blue_point_class_name', 'blue circle push point')
+        self.declare_parameter('press_point_mode', 'blue')
+        self.declare_parameter('press_point_vertical_ratio', 0.5)
         self.declare_parameter('blue_point_min_area', 40.0)
         self.declare_parameter('blue_point_max_area_ratio', 0.02)
+        self.declare_parameter('roi_mean_filter_enabled', False)
+        self.declare_parameter('roi_mean_filter_window', 3)
+        self.declare_parameter('roi_mean_filter_max_jump_px', 40.0)
+        self.declare_parameter('roi_mean_filter_max_missed', 2)
         self.declare_parameter(
             'prompts',
             'lever door handle,horizontal door handle,door lever handle,pull door handle',
@@ -186,8 +212,28 @@ class YoloDetectorNode(Node):
             self.get_logger().error('Backend inference failed: %s' % exc)
             return
         if self.detect_blue_point:
-            detections = list(detections) + self._detect_blue_point(bgr_image, detections)
+            # Legacy blue-marker mode: HSV owns the target and replaces any
+            # model-native press detections.
+            detections = [
+                det
+                for det in detections
+                if not self._is_press_point_name(det.get('class_name', ''))
+            ]
+            detections = list(detections) + self._detect_press_point(bgr_image, detections)
+        else:
+            # White-tape mode: keep the model detection but expose the physical
+            # marker's actual color/shape semantics to downstream consumers.
+            detections = [dict(det) for det in detections]
+            for det in detections:
+                if self._is_press_point_name(det.get('class_name', '')):
+                    det['class_name'] = self.blue_point_class_name
+        if not any(self._is_handle_detection(det) for det in detections):
+            press = self._best_blue_detection(detections)
+            fallback_handle = self._detect_black_handle(bgr_image, press)
+            if fallback_handle is not None:
+                detections = list(detections) + [fallback_handle]
         detections = self._attach_handle_grasp_edges(bgr_image, detections)
+        detections = self._smooth_detection_rois(detections)
 
         objects_msg = self._build_objects_msg(image_msg.header, detections)
         self.objects_pub.publish(objects_msg)
@@ -234,8 +280,9 @@ class YoloDetectorNode(Node):
             cx = int(round(float(det.get('cx', float(xmin + xmax) * 0.5))))
             cy = int(round(float(det.get('cy', float(ymin + ymax) * 0.5))))
 
-            color = (255, 128, 0) if 'blue' in class_name.lower() else (0, 255, 0)
-            center_color = (255, 0, 0) if 'blue' in class_name.lower() else (0, 0, 255)
+            is_press = self._is_press_point_name(class_name)
+            color = (255, 128, 0) if is_press else (0, 255, 0)
+            center_color = (255, 0, 0) if is_press else (0, 0, 255)
             cv2.rectangle(image, (xmin, ymin), (xmax, ymax), color, 2)
             cv2.circle(image, (cx, cy), 5, center_color, -1)
             edge_px = det.get('handle_grasp_edge_px') or []
@@ -284,15 +331,197 @@ class YoloDetectorNode(Node):
     def _best_blue_detection(self, detections):
         blue = [
             det for det in detections
-            if 'blue' in str(det.get('class_name', '')).lower()
+            if self._is_press_point_name(det.get('class_name', ''))
         ]
         if not blue:
             return None
         return max(blue, key=lambda det: float(det.get('confidence', 0.0)))
 
+    def _is_press_point_name(self, class_name):
+        name = str(class_name or '').lower().replace('_', ' ').replace('-', ' ')
+        return (
+            'blue' in name
+            or 'circle push point' in name
+            or 'white square push point' in name
+            or 'red sticker push point' in name
+        )
+
     def _is_handle_detection(self, det):
         name = str(det.get('class_name', '')).lower()
         return any(token in name for token in ('handle', 'lever', 'pull', 'cabinet door'))
+
+    def _detect_black_handle(self, image, press, min_area=180.0):
+        if image is None or image.size == 0:
+            return None
+        img_h, img_w = image.shape[:2]
+        if press is not None:
+            bx = int(round(float(press.get('cx', 0.0))))
+            by = int(round(float(press.get('cy', 0.0))))
+            rx1, ry1 = max(0, bx - 260), max(0, by - 360)
+            rx2, ry2 = min(img_w, bx + 260), min(img_h, by + 360)
+        else:
+            rx1, ry1, rx2, ry2 = 0, 0, img_w, img_h
+
+        crop = image[ry1:ry2, rx1:rx2]
+        if crop.size == 0:
+            return None
+        hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
+        mask = cv2.inRange(hsv, (0, 0, 0), (179, 255, 85))
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 9))
+        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=2)
+        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        candidates = []
+        for contour in contours:
+            area = float(cv2.contourArea(contour))
+            if area < float(min_area):
+                continue
+            x, y, w, h = cv2.boundingRect(contour)
+            if w < 8 or h < 25:
+                continue
+            aspect = float(w) / float(h)
+            elongation = max(aspect, 1.0 / max(aspect, 1e-6))
+            if elongation < 1.6:
+                continue
+            if w > img_w * 0.75 or h > img_h * 0.85:
+                continue
+            gx1, gy1, gx2, gy2 = rx1 + x, ry1 + y, rx1 + x + w, ry1 + y + h
+            score = area * elongation
+            if press is not None:
+                bx = float(press.get('cx', 0.0))
+                by = float(press.get('cy', 0.0))
+                if gx1 - 30 <= bx <= gx2 + 30 and gy1 - 30 <= by <= gy2 + 30:
+                    score *= 2.0
+                distance = np.hypot(float((gx1 + gx2) * 0.5 - bx), float((gy1 + gy2) * 0.5 - by))
+                score *= 1.0 / max(1.0, distance / 160.0)
+            candidates.append(
+                (
+                    score,
+                    {
+                        'class_name': 'black cabinet door handle',
+                        'class_id': 9002,
+                        'confidence': 0.55,
+                        'xmin': int(gx1),
+                        'ymin': int(gy1),
+                        'xmax': int(gx2),
+                        'ymax': int(gy2),
+                        'cx': float(gx1 + gx2) * 0.5,
+                        'cy': float(gy1 + gy2) * 0.5,
+                        'source': 'opencv_black',
+                    },
+                )
+            )
+        if not candidates:
+            return None
+        return max(candidates, key=lambda item: item[0])[1]
+
+    def _smooth_detection_rois(self, detections):
+        detections = [dict(det) for det in detections]
+        if not self.roi_mean_filter_enabled or self.roi_mean_filter_window <= 1:
+            return detections
+
+        for tracks in self._roi_mean_tracks.values():
+            for track in tracks:
+                track['missed'] += 1
+
+        used_tracks = {'press': set(), 'handle': set()}
+        for det in detections:
+            kind = self._roi_filter_kind(det)
+            if kind is None:
+                continue
+            center = self._detection_center(det)
+            tracks = self._roi_mean_tracks[kind]
+            best_index = None
+            best_distance = None
+            for index, track in enumerate(tracks):
+                if index in used_tracks[kind]:
+                    continue
+                distance = float(np.linalg.norm(center - track['raw_center']))
+                if distance > self.roi_mean_filter_max_jump_px:
+                    continue
+                if best_distance is None or distance < best_distance:
+                    best_index = index
+                    best_distance = distance
+
+            if best_index is None:
+                track = {
+                    'raw_center': center,
+                    'history': deque(maxlen=self.roi_mean_filter_window),
+                    'missed': 0,
+                }
+                tracks.append(track)
+                best_index = len(tracks) - 1
+            else:
+                track = tracks[best_index]
+                track['raw_center'] = center
+                track['missed'] = 0
+
+            used_tracks[kind].add(best_index)
+            track['history'].append(self._roi_geometry(det))
+            self._apply_mean_geometry(det, track['history'])
+
+        for kind, tracks in self._roi_mean_tracks.items():
+            self._roi_mean_tracks[kind] = [
+                track
+                for track in tracks
+                if track['missed'] <= self.roi_mean_filter_max_missed
+            ]
+        return detections
+
+    def _roi_filter_kind(self, det):
+        if self._is_press_point_name(det.get('class_name', '')):
+            return 'press'
+        if self._is_handle_detection(det):
+            return 'handle'
+        return None
+
+    def _detection_center(self, det):
+        return np.asarray(
+            [
+                float(det.get('cx', (float(det.get('xmin', 0)) + float(det.get('xmax', 0))) * 0.5)),
+                float(det.get('cy', (float(det.get('ymin', 0)) + float(det.get('ymax', 0))) * 0.5)),
+            ],
+            dtype=np.float64,
+        )
+
+    def _roi_geometry(self, det):
+        center = self._detection_center(det)
+        geometry = {
+            key: np.asarray([float(det.get(key, 0.0))], dtype=np.float64)
+            for key in ('xmin', 'ymin', 'xmax', 'ymax')
+        }
+        geometry['cx'] = np.asarray([center[0]], dtype=np.float64)
+        geometry['cy'] = np.asarray([center[1]], dtype=np.float64)
+        edge_px = det.get('handle_grasp_edge_px') or []
+        if len(edge_px) == 2:
+            geometry['handle_grasp_edge_px'] = np.asarray(edge_px, dtype=np.float64).reshape(4)
+        center_px = det.get('handle_grasp_center_px') or []
+        if len(center_px) == 2:
+            geometry['handle_grasp_center_px'] = np.asarray(center_px, dtype=np.float64).reshape(2)
+        return geometry
+
+    def _apply_mean_geometry(self, det, history):
+        for key in ('xmin', 'ymin', 'xmax', 'ymax', 'cx', 'cy'):
+            values = [entry[key] for entry in history if key in entry]
+            if not values:
+                continue
+            mean_value = float(np.mean(np.stack(values, axis=0)))
+            det[key] = int(round(mean_value)) if key in ('xmin', 'ymin', 'xmax', 'ymax') else mean_value
+
+        for key, shape in (('handle_grasp_edge_px', (2, 2)), ('handle_grasp_center_px', (2,))):
+            if not det.get(key):
+                continue
+            values = [entry[key] for entry in history if key in entry]
+            if not values:
+                continue
+            mean_value = np.mean(np.stack(values, axis=0), axis=0).reshape(shape)
+            det[key] = np.rint(mean_value).astype(int).tolist()
+
+        edge_px = det.get('handle_grasp_edge_px') or []
+        if len(edge_px) == 2:
+            det['handle_grasp_width_px'] = float(
+                np.linalg.norm(np.asarray(edge_px[1], dtype=np.float64) - np.asarray(edge_px[0], dtype=np.float64))
+            )
 
     def _estimate_handle_grasp_edge(self, image, handle, blue, min_area=220.0, inset_ratio=0.10):
         img_h, img_w = image.shape[:2]
@@ -387,6 +616,150 @@ class YoloDetectorNode(Node):
             'handle_grasp_mask_area_px': float(area),
             'handle_grasp_long_axis_length_px': float(long_len),
         }
+
+    def _detect_press_point(self, image, detections):
+        if self.press_point_mode in ('red', 'red_sticker', 'red-sticker'):
+            return self._detect_red_sticker_point(image, detections)
+        if self.press_point_mode in ('white', 'white_square', 'white-square'):
+            return self._detect_white_square_point(image, detections)
+        return self._detect_blue_point(image, detections)
+
+    def _detect_red_sticker_point(self, image, detections):
+        if image is None or image.size == 0:
+            return []
+
+        img_h, img_w = image.shape[:2]
+        candidates = []
+        for rx1, ry1, rx2, ry2 in self._blue_search_rois(detections, img_w, img_h):
+            crop = image[ry1:ry2, rx1:rx2]
+            if crop.size == 0:
+                continue
+            hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
+            mask_low = cv2.inRange(hsv, (0, 70, 45), (14, 255, 255))
+            mask_high = cv2.inRange(hsv, (165, 70, 45), (179, 255, 255))
+            mask = cv2.bitwise_or(mask_low, mask_high)
+            kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (7, 7))
+            mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+            mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=2)
+            contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            for contour in contours:
+                area = float(cv2.contourArea(contour))
+                if area < max(100.0, self.blue_point_min_area):
+                    continue
+                if area > float(img_w * img_h) * max(self.blue_point_max_area_ratio, 1e-6):
+                    continue
+                x, y, w, h = cv2.boundingRect(contour)
+                if w < 10 or h < 10:
+                    continue
+                aspect = float(w) / float(h)
+                if aspect < 0.45 or aspect > 2.20:
+                    continue
+                rectangularity = area / float(max(1, w * h))
+                if rectangularity < 0.45:
+                    continue
+
+                gx1, gy1 = int(rx1 + x), int(ry1 + y)
+                gx2, gy2 = int(gx1 + w), int(gy1 + h)
+                cx = float(gx1 + gx2) * 0.5
+                cy = float(gy1) + float(h) * self.press_point_vertical_ratio
+                square_score = 1.0 - min(1.0, abs(1.0 - aspect))
+                candidates.append(
+                    (
+                        area * rectangularity * max(0.2, square_score),
+                        {
+                            'class_name': self.blue_point_class_name,
+                            'class_id': 9001,
+                            'confidence': min(0.99, 0.50 + 0.35 * rectangularity),
+                            'xmin': gx1,
+                            'ymin': gy1,
+                            'xmax': gx2,
+                            'ymax': gy2,
+                            'cx': cx,
+                            'cy': cy,
+                        },
+                    )
+                )
+
+        if not candidates:
+            return []
+        return [max(candidates, key=lambda item: item[0])[1]]
+
+    def _detect_white_square_point(self, image, detections):
+        if image is None or image.size == 0:
+            return []
+
+        img_h, img_w = image.shape[:2]
+        hsv_full = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+        candidates = []
+        for rx1, ry1, rx2, ry2 in self._blue_search_rois(detections, img_w, img_h):
+            crop_hsv = hsv_full[ry1:ry2, rx1:rx2]
+            if crop_hsv.size == 0:
+                continue
+            mask = cv2.inRange(crop_hsv, (0, 0, 145), (179, 95, 255))
+            kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
+            mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+            mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=2)
+            contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            for contour in contours:
+                area = float(cv2.contourArea(contour))
+                if area < max(100.0, self.blue_point_min_area):
+                    continue
+                if area > float(img_w * img_h) * max(self.blue_point_max_area_ratio, 1e-6):
+                    continue
+                x, y, w, h = cv2.boundingRect(contour)
+                if w < 10 or h < 10:
+                    continue
+                aspect = float(w) / float(h)
+                if aspect < 0.60 or aspect > 1.55:
+                    continue
+                rectangularity = area / float(max(1, w * h))
+                if rectangularity < 0.52:
+                    continue
+
+                gx1, gy1, gx2, gy2 = rx1 + x, ry1 + y, rx1 + x + w, ry1 + y + h
+                pad = max(6, int(round(max(w, h) * 0.30)))
+                sx1, sy1 = max(0, gx1 - pad), max(0, gy1 - pad)
+                sx2, sy2 = min(img_w, gx2 + pad), min(img_h, gy2 + pad)
+                value_region = hsv_full[sy1:sy2, sx1:sx2, 2]
+                if value_region.size == 0:
+                    continue
+                ring_mask = np.ones(value_region.shape, dtype=bool)
+                ring_mask[gy1 - sy1:gy2 - sy1, gx1 - sx1:gx2 - sx1] = False
+                ring_values = value_region[ring_mask]
+                inner_values = hsv_full[gy1:gy2, gx1:gx2, 2]
+                if ring_values.size == 0 or inner_values.size == 0:
+                    continue
+                contrast = float(np.mean(inner_values)) - float(np.median(ring_values))
+                if contrast < 22.0:
+                    continue
+
+                moments = cv2.moments(contour)
+                if moments['m00'] != 0.0:
+                    cx = rx1 + float(moments['m10'] / moments['m00'])
+                    cy = ry1 + float(moments['m01'] / moments['m00'])
+                else:
+                    cx, cy = float(gx1 + gx2) * 0.5, float(gy1 + gy2) * 0.5
+                square_score = 1.0 - min(1.0, abs(1.0 - aspect))
+                candidates.append(
+                    (
+                        area * rectangularity * max(0.2, square_score) * contrast,
+                        {
+                            'class_name': self.blue_point_class_name,
+                            'class_id': 9001,
+                            'confidence': min(0.99, 0.50 + 0.25 * rectangularity + 0.002 * contrast),
+                            'xmin': int(gx1),
+                            'ymin': int(gy1),
+                            'xmax': int(gx2),
+                            'ymax': int(gy2),
+                            'cx': float(cx),
+                            'cy': float(cy),
+                        },
+                    )
+                )
+
+        if not candidates:
+            return []
+        return [max(candidates, key=lambda item: item[0])[1]]
 
     def _detect_blue_point(self, image, detections):
         if image is None or image.size == 0:

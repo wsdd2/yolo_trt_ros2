@@ -5,6 +5,7 @@ import os
 import sys
 import time
 import ctypes
+from collections import deque
 from pathlib import Path
 
 
@@ -167,6 +168,7 @@ class CoordinateProjectorNode(Node):
         self.target_pose_topic = self.get_parameter('target_pose_topic').value
         self.target_joint_state_topic = self.get_parameter('target_joint_state_topic').value
         self.current_joint_state_topic = self.get_parameter('current_joint_state_topic').value
+        self.current_ee_point_topic = self.get_parameter('current_ee_point_topic').value
         self.objects_ik_topic = self.get_parameter('objects_ik_topic').value
         self.robot_status_topic = self.get_parameter('robot_status_topic').value
         self.target_frame = str(self.get_parameter('target_frame').value)
@@ -200,6 +202,9 @@ class CoordinateProjectorNode(Node):
         self.h2_xr_scripts_dir = str(self.get_parameter('h2_xr_scripts_dir').value)
         self.min_confidence = float(self.get_parameter('min_confidence').value)
         self.depth_radius = int(self.get_parameter('depth_radius').value)
+        self.depth_min_valid_count = int(self.get_parameter('depth_min_valid_count').value)
+        self.depth_percentile = float(self.get_parameter('depth_percentile').value)
+        self.press_max_depth_m = float(self.get_parameter('press_max_depth_m').value)
         self.depth_fallback = str(self.get_parameter('depth_fallback').value).strip().lower()
         self.depth_roi_scale = float(self.get_parameter('depth_roi_scale').value)
         self.depth_expanded_roi_scale = float(self.get_parameter('depth_expanded_roi_scale').value)
@@ -211,6 +216,10 @@ class CoordinateProjectorNode(Node):
         self.handle_depth_max_blue_distance_px = float(self.get_parameter('handle_depth_max_blue_distance_px').value)
         self.handle_depth_sticky_px = float(self.get_parameter('handle_depth_sticky_px').value)
         self.handle_mid_right_offset_m = float(self.get_parameter('handle_mid_right_offset_m').value)
+        self.press_point_ground_ratio = max(
+            0.0,
+            min(1.0, float(self.get_parameter('press_point_ground_ratio').value)),
+        )
         self.depth_scale = float(self.get_parameter('depth_scale').value)
         self.min_depth_m = float(self.get_parameter('min_depth_m').value)
         self.max_depth_m = float(self.get_parameter('max_depth_m').value)
@@ -221,6 +230,8 @@ class CoordinateProjectorNode(Node):
         self.publish_objects_ik_json = bool(self.get_parameter('publish_objects_ik_json').value)
         self.publish_failed_ik_solution = bool(self.get_parameter('publish_failed_ik_solution').value)
         self.stale_depth_sec = float(self.get_parameter('stale_depth_sec').value)
+        self.depth_sync_tolerance_sec = float(self.get_parameter('depth_sync_tolerance_sec').value)
+        self.depth_cache_size = int(self.get_parameter('depth_cache_size').value)
         self.transform_timeout_sec = float(self.get_parameter('transform_timeout_sec').value)
         self.class_filter = set(self._get_string_list_parameter('class_filter'))
         self.pose_orientation_xyzw = self._get_float_list_parameter(
@@ -242,8 +253,9 @@ class CoordinateProjectorNode(Node):
         self.max_ik_objects = int(self.get_parameter('max_ik_objects').value)
 
         self.bridge = CvBridge()
-        self.latest_depth_msg = None
+        self.latest_depth_stamp_ns = 0
         self.latest_depth = None
+        self.depth_cache = deque(maxlen=max(2, self.depth_cache_size))
         self.latest_camera_info = None
         self.handeye_transform = None
         self.T_cam2hand = None
@@ -255,7 +267,9 @@ class CoordinateProjectorNode(Node):
         self._fk_error = ''
         self._ik_error = ''
         self._last_ik_warning_sec = 0.0
+        self._last_depth_sync_warning_sec = 0.0
         self._last_depth_handle_grasp = None
+        self._frame_handle_reference = None
         self.latest_robot_status = None
         self._configure_handeye_and_fk()
 
@@ -273,6 +287,7 @@ class CoordinateProjectorNode(Node):
         self.target_pose_pub = self.create_publisher(PoseStamped, self.target_pose_topic, 10)
         self.target_joint_state_pub = self.create_publisher(JointState, self.target_joint_state_topic, 10)
         self.current_joint_state_pub = self.create_publisher(JointState, self.current_joint_state_topic, 10)
+        self.current_ee_point_pub = self.create_publisher(PointStamped, self.current_ee_point_topic, 10)
         self.objects_ik_pub = self.create_publisher(String, self.objects_ik_topic, 10)
 
         self.create_subscription(Image, self.depth_topic, self._depth_callback, 10)
@@ -302,6 +317,7 @@ class CoordinateProjectorNode(Node):
         self.declare_parameter('target_pose_topic', '/detector/target_pose')
         self.declare_parameter('target_joint_state_topic', '/detector/target_joint_state')
         self.declare_parameter('current_joint_state_topic', '/detector/current_joint_state')
+        self.declare_parameter('current_ee_point_topic', '/detector/current_ee_point')
         self.declare_parameter('objects_ik_topic', '/detector/objects_ik_json')
         self.declare_parameter('robot_status_topic', '/robot/inspection_status')
         self.declare_parameter('target_frame', '')
@@ -327,6 +343,9 @@ class CoordinateProjectorNode(Node):
         self.declare_parameter('class_filter', '')
         self.declare_parameter('min_confidence', 0.25)
         self.declare_parameter('depth_radius', 3)
+        self.declare_parameter('depth_min_valid_count', 8)
+        self.declare_parameter('depth_percentile', 35.0)
+        self.declare_parameter('press_max_depth_m', 1.2)
         self.declare_parameter('depth_fallback', 'bbox')
         self.declare_parameter('depth_roi_scale', 0.55)
         self.declare_parameter('depth_expanded_roi_scale', 1.8)
@@ -338,6 +357,7 @@ class CoordinateProjectorNode(Node):
         self.declare_parameter('handle_depth_max_blue_distance_px', 180.0)
         self.declare_parameter('handle_depth_sticky_px', 45.0)
         self.declare_parameter('handle_mid_right_offset_m', 0.01)
+        self.declare_parameter('press_point_ground_ratio', 0.5)
         self.declare_parameter('depth_scale', 0.001)
         self.declare_parameter('min_depth_m', 0.10)
         self.declare_parameter('max_depth_m', 5.0)
@@ -361,6 +381,8 @@ class CoordinateProjectorNode(Node):
         self.declare_parameter('ik_orientation_weight', 0.0)
         self.declare_parameter('max_ik_objects', 24)
         self.declare_parameter('stale_depth_sec', 0.5)
+        self.declare_parameter('depth_sync_tolerance_sec', 0.08)
+        self.declare_parameter('depth_cache_size', 60)
         self.declare_parameter('transform_timeout_sec', 0.05)
 
     def _get_string_list_parameter(self, name):
@@ -594,8 +616,11 @@ class CoordinateProjectorNode(Node):
             self.get_logger().error('Failed to convert depth image: %s' % exc)
             return
 
-        self.latest_depth_msg = depth_msg
-        self.latest_depth = np.asarray(depth)
+        depth_array = np.asarray(depth)
+        stamp_ns = self._stamp_to_ns(depth_msg.header.stamp)
+        self.latest_depth_stamp_ns = stamp_ns
+        self.latest_depth = depth_array
+        self.depth_cache.append((stamp_ns, depth_array))
 
     def _camera_info_callback(self, camera_info):
         self.latest_camera_info = camera_info
@@ -613,27 +638,57 @@ class CoordinateProjectorNode(Node):
             self.objects_3d_pub.publish(out_msg)
             return
 
-        if self._depth_is_stale(objects_msg.header):
-            self.get_logger().warn('Depth image is stale for detector frame.')
+        depth_match = self._select_depth_for_header(objects_msg.header)
+        if depth_match is None:
+            now = time.monotonic()
+            if now - self._last_depth_sync_warning_sec >= 1.0:
+                self._last_depth_sync_warning_sec = now
+                self.get_logger().warn(
+                    'No synchronized depth for detector frame; refusing stale 3D target '
+                    '(tolerance=%.3fs, cache=%d).'
+                    % (self.depth_sync_tolerance_sec, len(self.depth_cache))
+                )
+            out_msg.objects = [
+                self._invalid_object(obj, objects_msg.header, 'no synchronized depth frame')
+                for obj in objects_msg.objects
+                if self.publish_invalid
+            ]
+            self.objects_3d_pub.publish(out_msg)
+            return
 
-        best_obj = None
+        self.latest_depth_stamp_ns, self.latest_depth = depth_match
+        self._frame_handle_reference = self._best_handle_reference(objects_msg.objects)
+
+        # Keep all projected objects for perception/grasp diagnostics, but the
+        # public action target must be the circular push point only. Selecting the
+        # highest-confidence object used to publish the handle center whenever
+        # its YOLO confidence exceeded the OpenCV blue-point confidence.
+        best_blue_obj = None
         for obj in objects_msg.objects:
             if not self._passes_filter(obj):
                 continue
 
+            self._apply_ground_ratio_to_red_sticker(obj)
             object_3d = self._project_object(obj, objects_msg.header)
             if object_3d.valid or self.publish_invalid:
                 out_msg.objects.append(object_3d)
-            if object_3d.valid and (best_obj is None or obj.confidence > best_obj.detection.confidence):
-                best_obj = object_3d
+            if (
+                object_3d.valid
+                and self._is_blue_point_detection(obj)
+                and (
+                    best_blue_obj is None
+                    or obj.confidence > best_blue_obj.detection.confidence
+                )
+            ):
+                best_blue_obj = object_3d
 
         self.objects_3d_pub.publish(out_msg)
         joints = self._current_joint_values()
         if joints:
             self._publish_current_joint_state(joints, objects_msg.header)
         self._publish_objects_ik_json(out_msg, objects_msg.header, joints)
-        if best_obj is not None:
-            self._publish_target(best_obj)
+        if best_blue_obj is not None:
+            self._publish_target(best_blue_obj)
 
     def _passes_filter(self, obj):
         if obj.confidence < self.min_confidence:
@@ -643,13 +698,27 @@ class CoordinateProjectorNode(Node):
         return True
 
     def _depth_is_stale(self, objects_header):
-        if self.stale_depth_sec <= 0.0 or self.latest_depth_msg is None:
+        if self.stale_depth_sec <= 0.0 or self.latest_depth_stamp_ns <= 0:
             return False
-        object_t = self._stamp_to_sec(objects_header.stamp)
-        depth_t = self._stamp_to_sec(self.latest_depth_msg.header.stamp)
-        if object_t <= 0.0 or depth_t <= 0.0:
+        object_ns = self._stamp_to_ns(objects_header.stamp)
+        if object_ns <= 0:
             return False
-        return abs(object_t - depth_t) > self.stale_depth_sec
+        return abs(object_ns - self.latest_depth_stamp_ns) * 1e-9 > self.stale_depth_sec
+
+    def _select_depth_for_header(self, objects_header):
+        if not self.depth_cache:
+            return None
+        object_ns = self._stamp_to_ns(objects_header.stamp)
+        if object_ns <= 0:
+            return self.depth_cache[-1]
+        best = min(self.depth_cache, key=lambda item: abs(item[0] - object_ns))
+        delta_sec = abs(best[0] - object_ns) * 1e-9
+        if delta_sec > max(0.0, self.depth_sync_tolerance_sec):
+            return None
+        return best
+
+    def _stamp_to_ns(self, stamp):
+        return int(stamp.sec) * 1000000000 + int(stamp.nanosec)
 
     def _stamp_to_sec(self, stamp):
         return float(stamp.sec) + float(stamp.nanosec) * 1e-9
@@ -729,24 +798,153 @@ class CoordinateProjectorNode(Node):
         return msg
 
     def _sample_object_depth_m(self, obj):
-        center = self._sample_depth_m(obj.cx, obj.cy)
+        # A blue press point is a near-field eye-in-hand target. If its own
+        # depth is missing, never substitute a multi-meter background surface.
+        is_press = self._is_blue_point_detection(obj)
+        max_depth_m = self.max_depth_m
+        if is_press:
+            max_depth_m = min(max_depth_m, self.press_max_depth_m)
+
+        center = self._sample_depth_m(obj.cx, obj.cy, max_depth_m=max_depth_m)
         if center is not None:
-            return center[0], 'center', center[1]
+            return center[0], 'center_percentile', center[1]
 
         if self.depth_fallback not in ('bbox', 'roi'):
             return None
 
         bbox = (float(obj.xmin), float(obj.ymin), float(obj.xmax), float(obj.ymax))
-        roi = self._sample_bbox_depth_m(float(obj.cx), float(obj.cy), bbox, self.depth_roi_scale)
+        roi = self._sample_bbox_depth_m(
+            float(obj.cx),
+            float(obj.cy),
+            bbox,
+            self.depth_roi_scale,
+            max_depth_m=max_depth_m,
+        )
         if roi is not None:
-            return roi[0], 'bbox_roi', roi[1]
+            return roi[0], 'bbox_roi_percentile', roi[1]
 
-        expanded = self._sample_bbox_depth_m(float(obj.cx), float(obj.cy), bbox, self.depth_expanded_roi_scale)
+        if is_press:
+            if self._frame_handle_reference is not None:
+                fitted = self._fit_handle_plane_depth(obj, self._frame_handle_reference)
+                if fitted is not None:
+                    return fitted[0], 'handle_plane_fit', fitted[1]
+
+                # Conservative final fallback: scalar depth from the handle bbox.
+                handle = self._frame_handle_reference
+                handle_bbox = (
+                    float(handle.xmin),
+                    float(handle.ymin),
+                    float(handle.xmax),
+                    float(handle.ymax),
+                )
+                sampled = self._sample_bbox_depth_m(
+                    float(handle.cx),
+                    float(handle.cy),
+                    handle_bbox,
+                    1.0,
+                    max_depth_m=max_depth_m,
+                )
+                if sampled is not None:
+                    return sampled[0], 'handle_plane_percentile', sampled[1]
+
+            # Never expand a press-point ROI into unrelated background. A
+            # missing foreground depth must suppress the action target.
+            return None
+
+        expanded = self._sample_bbox_depth_m(
+            float(obj.cx),
+            float(obj.cy),
+            bbox,
+            self.depth_expanded_roi_scale,
+            max_depth_m=max_depth_m,
+        )
         if expanded is not None:
-            return expanded[0], 'bbox_expanded', expanded[1]
+            return expanded[0], 'bbox_expanded_percentile', expanded[1]
         return None
 
-    def _sample_depth_m(self, u, v):
+    def _best_handle_reference(self, objects):
+        handles = [obj for obj in objects if self._is_handle_detection(obj)]
+        if not handles:
+            return None
+        return max(handles, key=lambda obj: float(obj.confidence))
+
+    def _fit_handle_plane_depth(self, target, handle):
+        """Fit inverse-depth plane over handle→button ROI and evaluate at target."""
+        depth = self.latest_depth
+        if depth is None or depth.size == 0:
+            return None
+        depth_h, depth_w = depth.shape[:2]
+
+        handle_w = max(4.0, abs(float(handle.xmax) - float(handle.xmin)))
+        handle_h = max(4.0, abs(float(handle.ymax) - float(handle.ymin)))
+        pad_x = max(6.0, handle_w * 0.45)
+        pad_y = max(6.0, handle_h * 0.12)
+        left = min(float(handle.xmin), float(handle.xmax), float(target.cx)) - pad_x
+        right = max(float(handle.xmin), float(handle.xmax), float(target.cx)) + pad_x
+        top = min(float(handle.ymin), float(handle.ymax), float(target.cy)) - pad_y
+        bottom = max(float(handle.ymin), float(handle.ymax), float(target.cy)) + pad_y
+        x0, y0 = self._map_pixel_to_depth_image(left, top, depth_w, depth_h)
+        x1, y1 = self._map_pixel_to_depth_image(right, bottom, depth_w, depth_h)
+        x0, x1 = sorted((x0, x1))
+        y0, y1 = sorted((y0, y1))
+        x1 = min(depth_w, x1 + 1)
+        y1 = min(depth_h, y1 + 1)
+        if x1 <= x0 or y1 <= y0:
+            return None
+
+        roi_m = self._depth_patch_to_meters(np.asarray(depth[y0:y1, x0:x1]))
+        upper = min(self.max_depth_m, self.press_max_depth_m)
+        valid_mask = (
+            np.isfinite(roi_m)
+            & (roi_m >= self.min_depth_m)
+            & (roi_m <= upper)
+        )
+        ys, xs = np.nonzero(valid_mask)
+        values = roi_m[ys, xs]
+        min_valid = max(20, self.depth_min_valid_count)
+        if values.size < min_valid:
+            return None
+
+        median = float(np.median(values))
+        mad = float(np.median(np.abs(values - median)))
+        band = max(0.025, 3.5 * 1.4826 * mad)
+        keep = np.abs(values - median) <= band
+        xs = xs[keep].astype(np.float64) + float(x0)
+        ys = ys[keep].astype(np.float64) + float(y0)
+        values = values[keep]
+        if values.size < min_valid:
+            return None
+
+        target_x, target_y = self._map_pixel_to_depth_image(
+            float(target.cx), float(target.cy), depth_w, depth_h
+        )
+        sx = max(1.0, float(x1 - x0))
+        sy = max(1.0, float(y1 - y0))
+        xn = (xs - float(target_x)) / sx
+        yn = (ys - float(target_y)) / sy
+        design = np.column_stack((xn, yn, np.ones_like(xn)))
+        inv_depth = 1.0 / values
+        inliers = np.ones(values.size, dtype=bool)
+        coeff = None
+        for _ in range(3):
+            if int(np.count_nonzero(inliers)) < min_valid:
+                return None
+            coeff, _, _, _ = np.linalg.lstsq(
+                design[inliers], inv_depth[inliers], rcond=None
+            )
+            residual = inv_depth - design @ coeff
+            residual_mad = float(np.median(np.abs(residual[inliers])))
+            threshold = max(1e-6, 3.5 * 1.4826 * residual_mad)
+            inliers = np.abs(residual) <= threshold
+
+        if coeff is None or float(coeff[2]) <= 0.0:
+            return None
+        target_depth = 1.0 / float(coeff[2])
+        if not self.min_depth_m < target_depth < upper:
+            return None
+        return float(target_depth), int(np.count_nonzero(inliers))
+
+    def _sample_depth_m(self, u, v, max_depth_m=None):
         depth = self.latest_depth
         if depth is None or depth.size == 0:
             return None
@@ -761,9 +959,9 @@ class CoordinateProjectorNode(Node):
         if patch.size == 0:
             return None
 
-        return self._valid_depth_median(patch)
+        return self._valid_depth_percentile(patch, max_depth_m=max_depth_m)
 
-    def _sample_bbox_depth_m(self, cx, cy, bbox_xyxy, scale):
+    def _sample_bbox_depth_m(self, cx, cy, bbox_xyxy, scale, max_depth_m=None):
         depth = self.latest_depth
         if depth is None or depth.size == 0:
             return None
@@ -786,18 +984,20 @@ class CoordinateProjectorNode(Node):
         patch = np.asarray(depth[y0:y1, x0:x1])
         if patch.size == 0:
             return None
-        return self._valid_depth_median(patch)
+        return self._valid_depth_percentile(patch, max_depth_m=max_depth_m)
 
-    def _valid_depth_median(self, patch):
+    def _valid_depth_percentile(self, patch, max_depth_m=None):
         depth_m = self._depth_patch_to_meters(patch)
+        upper = self.max_depth_m if max_depth_m is None else min(self.max_depth_m, float(max_depth_m))
         valid = depth_m[
             np.isfinite(depth_m)
             & (depth_m >= self.min_depth_m)
-            & (depth_m <= self.max_depth_m)
+            & (depth_m <= upper)
         ]
-        if valid.size == 0:
+        if valid.size < max(1, self.depth_min_valid_count):
             return None
-        return float(np.median(valid)), int(valid.size)
+        percentile = max(0.0, min(100.0, self.depth_percentile))
+        return float(np.percentile(valid, percentile)), int(valid.size)
 
     def _map_pixel_to_depth_image(self, u, v, depth_w, depth_h):
         info = self.latest_camera_info
@@ -902,8 +1102,78 @@ class CoordinateProjectorNode(Node):
         messages.append('mount_offset_from_wrist=%s' % self._format_xyz(mount_offset))
         return target, '; '.join(messages)
 
+    def _apply_ground_ratio_to_red_sticker(self, detection):
+        name = str(getattr(detection, 'class_name', '')).lower()
+        if 'red sticker push point' not in name:
+            return
+        if self.T_cam2hand is None or self.latest_camera_info is None:
+            return
+        joints = self._current_joint_values()
+        if not joints:
+            return
+        try:
+            T_base_hand = np.asarray(self._compute_base_to_hand(joints), dtype=np.float64)
+            T_base_camera = T_base_hand @ np.asarray(self.T_cam2hand, dtype=np.float64)
+        except Exception as exc:
+            self._fk_error = 'ground-direction FK failed: %s' % exc
+            return
+
+        k = self.latest_camera_info.k
+        fx, fy = float(k[0]), float(k[4])
+        ppx, ppy = float(k[2]), float(k[5])
+        if fx == 0.0 or fy == 0.0:
+            return
+
+        center_x = 0.5 * (float(detection.xmin) + float(detection.xmax))
+        center_y = 0.5 * (float(detection.ymin) + float(detection.ymax))
+        ray_x = (center_x - ppx) / fx
+        ray_y = (center_y - ppy) / fy
+        ground_camera = T_base_camera[:3, :3].T @ np.array([0.0, 0.0, -1.0], dtype=np.float64)
+        image_direction = np.array(
+            [
+                fx * (ground_camera[0] - ray_x * ground_camera[2]),
+                fy * (ground_camera[1] - ray_y * ground_camera[2]),
+            ],
+            dtype=np.float64,
+        )
+        norm = float(np.linalg.norm(image_direction))
+        if norm < 1e-9:
+            return
+        direction = image_direction / norm
+
+        def distance_to_edge(dx, dy):
+            distances = []
+            if dx > 1e-9:
+                distances.append((float(detection.xmax) - center_x) / dx)
+            elif dx < -1e-9:
+                distances.append((float(detection.xmin) - center_x) / dx)
+            if dy > 1e-9:
+                distances.append((float(detection.ymax) - center_y) / dy)
+            elif dy < -1e-9:
+                distances.append((float(detection.ymin) - center_y) / dy)
+            positive = [value for value in distances if value >= 0.0]
+            return min(positive) if positive else 0.0
+
+        distance_ground = distance_to_edge(direction[0], direction[1])
+        distance_up = distance_to_edge(-direction[0], -direction[1])
+        ratio = self.press_point_ground_ratio
+        start = np.array([center_x, center_y], dtype=np.float64) - direction * distance_up
+        target = start + direction * ratio * (distance_up + distance_ground)
+        detection.cx = float(np.clip(target[0], float(detection.xmin), float(detection.xmax)))
+        detection.cy = float(np.clip(target[1], float(detection.ymin), float(detection.ymax)))
+
     def _is_blue_point_detection(self, detection):
-        return 'blue' in str(getattr(detection, 'class_name', '')).lower()
+        name = str(getattr(detection, 'class_name', '')).lower()
+        return (
+            'blue' in name
+            or 'circle push point' in name
+            or 'white square push point' in name
+            or 'red sticker push point' in name
+        )
+
+    def _is_handle_detection(self, detection):
+        name = str(getattr(detection, 'class_name', '')).lower()
+        return any(token in name for token in ('handle', 'lever', 'pull', 'cabinet door'))
 
     def _format_xyz(self, values):
         return '[%.4f, %.4f, %.4f]' % tuple(float(v) for v in np.asarray(values, dtype=np.float64).reshape(3))
@@ -1010,13 +1280,25 @@ class CoordinateProjectorNode(Node):
         joints = self._current_joint_values()
         if not joints:
             return
+        stamp = self.get_clock().now().to_msg()
         msg = JointState()
-        msg.header.stamp = self.get_clock().now().to_msg()
+        msg.header.stamp = stamp
         msg.header.frame_id = self.base_link or self._default_base_link()
         names = sorted(joints.keys())
         msg.name = names
         msg.position = [float(joints[name]) for name in names]
         self.current_joint_state_pub.publish(msg)
+
+        try:
+            transform = np.asarray(self._compute_base_to_hand(joints), dtype=np.float64)
+        except Exception as exc:
+            self._fk_error = 'current EE FK failed: %s' % exc
+            return
+        point_msg = PointStamped()
+        point_msg.header.stamp = stamp
+        point_msg.header.frame_id = self.base_link or self._default_base_link()
+        point_msg.point = self._point_to_msg(transform[:3, 3])
+        self.current_ee_point_pub.publish(point_msg)
 
     def _publish_objects_ik_json(self, objects_3d_msg, header, joints):
         if not self.publish_objects_ik_json:

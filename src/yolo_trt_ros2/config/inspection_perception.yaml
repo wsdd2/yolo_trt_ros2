@@ -25,19 +25,28 @@ yolo_detector:
     debug_image_topic: /detector/debug_image
     backend: yoloe
     model_path: /home/unitree/MscapeTech/models/yoloe-11s-seg.pt
-    mobileclip_path: ''
+    mobileclip_path: /home/unitree/MscapeTech/models/mobileclip_blt.ts
     model_kind: yoloe
-    # Private YOLOE set_classes list. Keep the real file in config/private/; it is ignored by git.
-    # This file is used when prompt_free=false. prompt_free=true keeps model-native classes.
-    yoloe_classes_path: /home/unitree/MscapeTech/Foxy_ROS/src/yolo_trt_ros2/config/private/yoloe_classes.txt
+    # Explicit open-vocabulary classes for the electrical control cabinet.
+    yoloe_classes_path: /home/unitree/MscapeTech/Foxy_ROS/src/yolo_trt_ros2/config/cabinet_controls_classes.txt
     prompts: ''
-    prompt_free: true
+    prompt_free: false
     best_handle_only: false
     filter_prompt_free_handles: false
-    detect_blue_point: true
-    blue_point_class_name: blue push point
+    # Cabinet mode uses explicit YOLOE classes; disable the temporary red-sticker target.
+    detect_blue_point: false
+    blue_point_class_name: red sticker push point
+    press_point_mode: red_sticker
+    # Detector publishes the geometric center; projector applies gravity direction.
+    press_point_vertical_ratio: 0.50
     blue_point_min_area: 40.0
     blue_point_max_area_ratio: 0.02
+    # Three-frame trailing mean suppresses ROI jitter while limiting eye-in-hand lag.
+    # Reset the history immediately when the raw center jumps more than 40 px.
+    roi_mean_filter_enabled: true
+    roi_mean_filter_window: 3
+    roi_mean_filter_max_jump_px: 40.0
+    roi_mean_filter_max_missed: 2
     conf_thres: 0.08
     iou_thres: 0.45
     imgsz: 640
@@ -54,6 +63,7 @@ coordinate_projector:
     target_pose_topic: /detector/target_pose
     target_joint_state_topic: /detector/target_joint_state
     current_joint_state_topic: /detector/current_joint_state
+    current_ee_point_topic: /detector/current_ee_point
     objects_ik_topic: /detector/objects_ik_json
     robot_status_topic: /robot/inspection_status
     target_frame: ''
@@ -75,10 +85,15 @@ coordinate_projector:
     h2_xr_scripts_dir: /home/unitree/H2_joint_cartesian/scripts
     handeye_mount_offset_from_wrist_xyz: [0.05, 0.0, 0.0]
     dex1_tip_from_wrist_xyz: [0.14, 0.01, 0.012]
-    blue_point_target_world_offset_xyz: [0.0, 0.0, -0.004]
+    blue_point_target_world_offset_xyz: [0.0, 0.001, -0.004]
     class_filter: ''
     min_confidence: 0.25
     depth_radius: 3
+    # Require a real local depth support; never accept one stray background pixel.
+    depth_min_valid_count: 8
+    depth_percentile: 35.0
+    # H2 eye-in-hand press marker is near-field; reject the observed 0.422 m background.
+    press_max_depth_m: 0.30
     depth_fallback: bbox
     depth_roi_scale: 0.55
     depth_expanded_roi_scale: 1.8
@@ -90,6 +105,8 @@ coordinate_projector:
     handle_depth_max_blue_distance_px: 180.0
     handle_depth_sticky_px: 45.0
     handle_mid_right_offset_m: 0.01
+    # From the gravity-opposite sticker edge toward the ground-facing edge.
+    press_point_ground_ratio: 0.80
     depth_scale: 0.001
     min_depth_m: 0.10
     max_depth_m: 5.0
@@ -112,6 +129,11 @@ coordinate_projector:
     ik_position_weight: 1.0
     ik_orientation_weight: 0.0
     max_ik_objects: 24
+    # Cache aligned depth frames and match the detector's original color stamp.
+    # YOLO inference can finish >0.5 s after capture; never use the newest,
+    # unrelated depth frame just because the matching frame is older.
+    depth_cache_size: 60
+    depth_sync_tolerance_sec: 0.20
     stale_depth_sec: 0.5
     transform_timeout_sec: 0.05
 
@@ -129,5 +151,6 @@ web_dashboard:
     target_pose_topic: /detector/target_pose
     target_joint_state_topic: /detector/target_joint_state
     current_joint_state_topic: /detector/current_joint_state
+    current_ee_point_topic: /detector/current_ee_point
     objects_ik_topic: /detector/objects_ik_json
     robot_status_topic: /robot/inspection_status
