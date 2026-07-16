@@ -451,7 +451,9 @@ INDEX_HTML = """<!doctype html>
               ? "click to copy blue press target"
               : ((obj.handle_mid_right_air_target_m || obj.handle_grasp_ree_target_m)
                   ? "click to copy explicit handle grasp target"
-                  : "no action target (object center is diagnostic only)");
+                  : (obj.point_torso_m
+                      ? "double click to copy object center"
+                      : "3D point unavailable"));
             tooltip.textContent =
               `${label.textContent}\\nworld ${coordText(obj)}\\n${obj.message || ""}\\n${ikText(obj)}\\n${copyHint}`;
           } else {
@@ -472,8 +474,13 @@ INDEX_HTML = """<!doctype html>
             text = coordText(obj);
           } else {
             const handleTarget = obj.handle_mid_right_air_target_m || obj.handle_grasp_ree_target_m;
-            if (!handleTarget) return;
-            text = xyzText(handleTarget);
+            if (handleTarget) {
+              text = xyzText(handleTarget);
+            } else if (obj.point_torso_m) {
+              text = coordText(obj);
+            } else {
+              return;
+            }
           }
           await copyText(text);
           const copy = document.getElementById("copy");
@@ -489,9 +496,15 @@ INDEX_HTML = """<!doctype html>
             targetKind = "press target";
           } else {
             const target = obj.handle_mid_right_air_target_m || obj.handle_grasp_ree_target_m;
-            if (!target) return;
-            text = xyzText(target);
-            targetKind = "handle target";
+            if (target) {
+              text = xyzText(target);
+              targetKind = "handle target";
+            } else if (obj.point_torso_m) {
+              text = coordText(obj);
+              targetKind = "object center";
+            } else {
+              return;
+            }
           }
           await copyText(text);
           const copy = document.getElementById("copy");

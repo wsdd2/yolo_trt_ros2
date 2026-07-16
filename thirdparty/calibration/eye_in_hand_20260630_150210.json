@@ -1,0 +1,356 @@
+{
+  "calibration_method": "eye_in_hand",
+  "saved_at_utc": "2026-06-30T07:02:10.606825+00:00",
+  "sample_count": 14,
+  "opencv_calibrateHandEye_method": 0,
+  "convention": {
+    "hand2base": "机器人输入位姿解析为 T_base_hand，即点从灵巧手/末端坐标变换到机器人基座坐标。",
+    "target2cam": "棋盘格坐标到相机坐标，来自 solvePnP。",
+    "cam2hand": "求解结果：相机坐标到灵巧手/末端坐标，适用于 eye-in-hand。"
+  },
+  "context": {
+    "camera_info": {
+      "index": 0,
+      "serial": "346522074739",
+      "model": "Intel RealSense D435",
+      "firmware": "5.15.1.55",
+      "product_line": "D400",
+      "camera_name": "right_wrist_d435",
+      "mount": "wrist",
+      "requested_index": 0,
+      "requested_serial": "346522074739",
+      "width": 1280,
+      "height": 720,
+      "fps": 30,
+      "color_only": true,
+      "available": true,
+      "fallback_index": 0,
+      "camera_role": "primary",
+      "selected_serial": "346522074739"
+    },
+    "robot_context": {
+      "robot_model": "Unitree H2",
+      "robot_host": "",
+      "robot_user": "",
+      "ros_distro": "",
+      "ros_domain_id": "",
+      "notes": "H2 wrist D435 eye-in-hand; FK hand frame is virtual R_ee without Dex1-1."
+    },
+    "board": {
+      "inner_corners_cols": 11,
+      "inner_corners_rows": 8,
+      "square_mm": 20.0,
+      "square_m": 0.02
+    },
+    "hand_frame": "R_ee",
+    "pose_units": {
+      "translation": "mm",
+      "rotation": "deg",
+      "euler_order": "xyz"
+    }
+  },
+  "npy_dir": "/home/unitree/MscapeTech/Hand_Eye_Calib/outputs/eye_in_hand_20260630_150210_npy",
+  "samples": [
+    {
+      "image": "20260630_145333_562_cam0_eye_in_hand.jpg",
+      "json": "data/eye_in_hand_20260630_145149/right_wrist_d435_filtered_rms015/20260630_145333_562_cam0_eye_in_hand.json",
+      "target_reprojection_rms_px": 0.1229828968638249,
+      "capture_mode": "eye_in_hand",
+      "camera_name": "right_wrist_d435",
+      "camera_mount": "wrist"
+    },
+    {
+      "image": "20260630_145438_671_cam0_eye_in_hand.jpg",
+      "json": "data/eye_in_hand_20260630_145149/right_wrist_d435_filtered_rms015/20260630_145438_671_cam0_eye_in_hand.json",
+      "target_reprojection_rms_px": 0.14784108505665,
+      "capture_mode": "eye_in_hand",
+      "camera_name": "right_wrist_d435",
+      "camera_mount": "wrist"
+    },
+    {
+      "image": "20260630_145506_240_cam0_eye_in_hand.jpg",
+      "json": "data/eye_in_hand_20260630_145149/right_wrist_d435_filtered_rms015/20260630_145506_240_cam0_eye_in_hand.json",
+      "target_reprojection_rms_px": 0.121255721344125,
+      "capture_mode": "eye_in_hand",
+      "camera_name": "right_wrist_d435",
+      "camera_mount": "wrist"
+    },
+    {
+      "image": "20260630_145516_618_cam0_eye_in_hand.jpg",
+      "json": "data/eye_in_hand_20260630_145149/right_wrist_d435_filtered_rms015/20260630_145516_618_cam0_eye_in_hand.json",
+      "target_reprojection_rms_px": 0.10266118832579374,
+      "capture_mode": "eye_in_hand",
+      "camera_name": "right_wrist_d435",
+      "camera_mount": "wrist"
+    },
+    {
+      "image": "20260630_145520_521_cam0_eye_in_hand.jpg",
+      "json": "data/eye_in_hand_20260630_145149/right_wrist_d435_filtered_rms015/20260630_145520_521_cam0_eye_in_hand.json",
+      "target_reprojection_rms_px": 0.09161673695770434,
+      "capture_mode": "eye_in_hand",
+      "camera_name": "right_wrist_d435",
+      "camera_mount": "wrist"
+    },
+    {
+      "image": "20260630_145526_914_cam0_eye_in_hand.jpg",
+      "json": "data/eye_in_hand_20260630_145149/right_wrist_d435_filtered_rms015/20260630_145526_914_cam0_eye_in_hand.json",
+      "target_reprojection_rms_px": 0.08775115356107212,
+      "capture_mode": "eye_in_hand",
+      "camera_name": "right_wrist_d435",
+      "camera_mount": "wrist"
+    },
+    {
+      "image": "20260630_145614_251_cam0_eye_in_hand.jpg",
+      "json": "data/eye_in_hand_20260630_145149/right_wrist_d435_filtered_rms015/20260630_145614_251_cam0_eye_in_hand.json",
+      "target_reprojection_rms_px": 0.14281734615173444,
+      "capture_mode": "eye_in_hand",
+      "camera_name": "right_wrist_d435",
+      "camera_mount": "wrist"
+    },
+    {
+      "image": "20260630_145640_444_cam0_eye_in_hand.jpg",
+      "json": "data/eye_in_hand_20260630_145149/right_wrist_d435_filtered_rms015/20260630_145640_444_cam0_eye_in_hand.json",
+      "target_reprojection_rms_px": 0.09736644778942091,
+      "capture_mode": "eye_in_hand",
+      "camera_name": "right_wrist_d435",
+      "camera_mount": "wrist"
+    },
+    {
+      "image": "20260630_145644_439_cam0_eye_in_hand.jpg",
+      "json": "data/eye_in_hand_20260630_145149/right_wrist_d435_filtered_rms015/20260630_145644_439_cam0_eye_in_hand.json",
+      "target_reprojection_rms_px": 0.07893238945053374,
+      "capture_mode": "eye_in_hand",
+      "camera_name": "right_wrist_d435",
+      "camera_mount": "wrist"
+    },
+    {
+      "image": "20260630_145651_701_cam0_eye_in_hand.jpg",
+      "json": "data/eye_in_hand_20260630_145149/right_wrist_d435_filtered_rms015/20260630_145651_701_cam0_eye_in_hand.json",
+      "target_reprojection_rms_px": 0.0720329545178726,
+      "capture_mode": "eye_in_hand",
+      "camera_name": "right_wrist_d435",
+      "camera_mount": "wrist"
+    },
+    {
+      "image": "20260630_145656_614_cam0_eye_in_hand.jpg",
+      "json": "data/eye_in_hand_20260630_145149/right_wrist_d435_filtered_rms015/20260630_145656_614_cam0_eye_in_hand.json",
+      "target_reprojection_rms_px": 0.0768102947978105,
+      "capture_mode": "eye_in_hand",
+      "camera_name": "right_wrist_d435",
+      "camera_mount": "wrist"
+    },
+    {
+      "image": "20260630_145705_917_cam0_eye_in_hand.jpg",
+      "json": "data/eye_in_hand_20260630_145149/right_wrist_d435_filtered_rms015/20260630_145705_917_cam0_eye_in_hand.json",
+      "target_reprojection_rms_px": 0.07279423457991958,
+      "capture_mode": "eye_in_hand",
+      "camera_name": "right_wrist_d435",
+      "camera_mount": "wrist"
+    },
+    {
+      "image": "20260630_145711_271_cam0_eye_in_hand.jpg",
+      "json": "data/eye_in_hand_20260630_145149/right_wrist_d435_filtered_rms015/20260630_145711_271_cam0_eye_in_hand.json",
+      "target_reprojection_rms_px": 0.07538924078101832,
+      "capture_mode": "eye_in_hand",
+      "camera_name": "right_wrist_d435",
+      "camera_mount": "wrist"
+    },
+    {
+      "image": "20260630_145717_333_cam0_eye_in_hand.jpg",
+      "json": "data/eye_in_hand_20260630_145149/right_wrist_d435_filtered_rms015/20260630_145717_333_cam0_eye_in_hand.json",
+      "target_reprojection_rms_px": 0.06804189578566301,
+      "capture_mode": "eye_in_hand",
+      "camera_name": "right_wrist_d435",
+      "camera_mount": "wrist"
+    }
+  ],
+  "cam2hand": {
+    "rvec": [
+      -0.010398228978088613,
+      1.5496971426579509,
+      -0.09437642463297652
+    ],
+    "tvec_m": [
+      0.012458257740350979,
+      -0.03999708729980356,
+      0.04748749525732939
+    ],
+    "rotation_matrix": [
+      [
+        0.018236299310384285,
+        0.05421273095249212,
+        0.9983628684952855
+      ],
+      [
+        -0.06733901442855443,
+        0.9963282518867461,
+        -0.05287221981429974
+      ],
+      [
+        -0.9975634789441988,
+        -0.06626457798079902,
+        0.021819972084619832
+      ]
+    ],
+    "transform": [
+      [
+        0.018236299310384285,
+        0.05421273095249212,
+        0.9983628684952855,
+        0.012458257740350979
+      ],
+      [
+        -0.06733901442855443,
+        0.9963282518867461,
+        -0.05287221981429974,
+        -0.03999708729980356
+      ],
+      [
+        -0.9975634789441988,
+        -0.06626457798079902,
+        0.021819972084619832,
+        0.04748749525732939
+      ],
+      [
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ]
+    ]
+  },
+  "hand2cam": {
+    "rvec": [
+      0.010398228978088613,
+      -1.5496971426579509,
+      0.09437642463297652
+    ],
+    "tvec_m": [
+      0.04445123401942708,
+      0.042321570727552535,
+      -0.015588772546640792
+    ],
+    "rotation_matrix": [
+      [
+        0.018236299310384285,
+        -0.06733901442855443,
+        -0.9975634789441988
+      ],
+      [
+        0.05421273095249212,
+        0.9963282518867461,
+        -0.06626457798079902
+      ],
+      [
+        0.9983628684952855,
+        -0.05287221981429974,
+        0.021819972084619832
+      ]
+    ],
+    "transform": [
+      [
+        0.018236299310384285,
+        -0.06733901442855443,
+        -0.9975634789441988,
+        0.04445123401942708
+      ],
+      [
+        0.05421273095249212,
+        0.9963282518867461,
+        -0.06626457798079902,
+        0.042321570727552535
+      ],
+      [
+        0.9983628684952855,
+        -0.05287221981429974,
+        0.021819972084619832,
+        -0.015588772546640792
+      ],
+      [
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ]
+    ]
+  },
+  "target2base_mean": {
+    "rvec": [
+      -1.3090067161212513,
+      0.9782685825433104,
+      -1.255286538141298
+    ],
+    "tvec_m": [
+      1.2268050565958963,
+      -0.07150881348903934,
+      0.2257284036367748
+    ],
+    "rotation_matrix": [
+      [
+        0.12289903269930191,
+        0.0940740814945108,
+        0.9879503504491206
+      ],
+      [
+        -0.9809984880074923,
+        -0.13907566053313414,
+        0.13527722341283616
+      ],
+      [
+        0.15012592810234315,
+        -0.9858032399207444,
+        0.07519426755527014
+      ]
+    ],
+    "transform": [
+      [
+        0.12289903269930191,
+        0.0940740814945108,
+        0.9879503504491206,
+        1.2268050565958963
+      ],
+      [
+        -0.9809984880074923,
+        -0.13907566053313414,
+        0.13527722341283616,
+        -0.07150881348903934
+      ],
+      [
+        0.15012592810234315,
+        -0.9858032399207444,
+        0.07519426755527014,
+        0.2257284036367748
+      ],
+      [
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ]
+    ]
+  },
+  "quality": {
+    "fixed_transform": "target2base",
+    "translation_std_m_xyz": [
+      0.0013312938091680064,
+      0.00345017806233201,
+      0.005245937164878338
+    ],
+    "rotation_error_deg_each": [
+      0.42367954912490524,
+      0.5337826758373294,
+      0.1834105953347494,
+      0.21097395326341362,
+      0.23848352477124748,
+      0.2851667460883673,
+      0.27865567148921233,
+      0.26212821985199786,
+      0.2623393388366465,
+      0.23832419910704414,
+      0.24445062525907124,
+      0.26210575138876374,
+      0.28101511513760125,
+      0.47099651385639474
+    ]
+  }
+}

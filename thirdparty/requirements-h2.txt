@@ -1,0 +1,8 @@
+# Python packages not supplied by ROS Humble.
+# Install PyTorch separately using the H2/CUDA platform-specific wheel.
+
+numpy<2
+ultralytics>=8.3.99
+pyrealsense2>=2.50
+cyclonedds==0.10.2
+pin

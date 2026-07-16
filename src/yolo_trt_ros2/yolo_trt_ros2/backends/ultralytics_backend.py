@@ -39,7 +39,12 @@ class UltralyticsBackend(object):
         self.prompts = [p.strip() for p in (prompts or []) if p.strip()]
         self.conf_thres = float(conf_thres)
         self.iou_thres = float(iou_thres)
-        self.imgsz = int(imgsz)
+        if isinstance(imgsz, (list, tuple)):
+            if len(imgsz) != 2:
+                raise ValueError('imgsz sequence must be [height, width]')
+            self.imgsz = [int(imgsz[0]), int(imgsz[1])]
+        else:
+            self.imgsz = int(imgsz)
         self.device = device
         self.prompt_free = bool(prompt_free)
         self.best_handle_only = bool(best_handle_only)
@@ -70,12 +75,11 @@ class UltralyticsBackend(object):
 
         try:
             from ultralytics.nn import text_model
+            from ultralytics.utils import downloads
         except Exception:
             return
 
-        original = getattr(text_model, 'attempt_download_asset', None)
-        if original is None:
-            from ultralytics.utils.downloads import attempt_download_asset as original
+        original = downloads.attempt_download_asset
 
         def _attempt_download_asset(asset, *args, **kwargs):
             name = str(asset).lower()
@@ -83,7 +87,12 @@ class UltralyticsBackend(object):
                 return resolved
             return original(asset, *args, **kwargs)
 
+        # Ultralytics releases differ here: some keep a module-level alias in
+        # nn.text_model, while others import from utils.downloads inside the
+        # MobileCLIP constructor. Patch both entry points so mobileclip_path is
+        # honored consistently.
         text_model.attempt_download_asset = _attempt_download_asset
+        downloads.attempt_download_asset = _attempt_download_asset
 
     def infer(self, bgr_image):
         if bgr_image is None or bgr_image.size == 0:

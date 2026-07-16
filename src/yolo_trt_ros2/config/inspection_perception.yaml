@@ -8,14 +8,16 @@ direct_realsense:
     depth_frame_id: camera_color_optical_frame
     width: 1280
     height: 720
-    fps: 30
+    # YOLOE cabinet inference is much slower than the camera. Six FPS keeps
+    # an exact RGB-D history long enough without a large memory cache.
+    fps: 6
     depth_width: 640
     depth_height: 480
-    depth_fps: 30
+    depth_fps: 6
     cam_index: 0
     cam_serial: ''
     frame_timeout_ms: 1000
-    publish_period_sec: 0.033
+    publish_period_sec: 0.1667
     restart_on_timeout_count: 30
 
 yolo_detector:
@@ -33,8 +35,8 @@ yolo_detector:
     prompt_free: false
     best_handle_only: false
     filter_prompt_free_handles: false
-    # Cabinet mode uses explicit YOLOE classes; disable the temporary red-sticker target.
-    detect_blue_point: false
+    # Keep the red-sticker opening target while YOLOE also detects cabinet controls.
+    detect_blue_point: true
     blue_point_class_name: red sticker push point
     press_point_mode: red_sticker
     # Detector publishes the geometric center; projector applies gravity direction.
@@ -50,10 +52,14 @@ yolo_detector:
     conf_thres: 0.08
     iou_thres: 0.45
     imgsz: 640
+    # Preserve the 1280x720 camera detail for small cabinet controls.
+    # Ultralytics pads height to the model stride internally.
+    imgsz_height: 720
+    imgsz_width: 1280
     device: ''
     publish_debug_image: true
 
-coordinate_projector:
+coordinate_projector:   
   ros__parameters:
     objects_topic: /detector/objects
     depth_topic: /camera/aligned_depth_to_color/image_raw
@@ -84,16 +90,18 @@ coordinate_projector:
     fk_backend: xr_pinocchio
     h2_xr_scripts_dir: /home/unitree/H2_joint_cartesian/scripts
     handeye_mount_offset_from_wrist_xyz: [0.05, 0.0, 0.0]
-    dex1_tip_from_wrist_xyz: [0.14, 0.01, 0.012]
-    blue_point_target_world_offset_xyz: [0.0, 0.001, -0.004]
+    dex1_tip_from_wrist_xyz: [0.115, 0.012, 0.013] # this vector means the distance from the wrist to the dex1 tip
+    blue_point_target_world_offset_xyz: [0.0, 0.001, -0.004] # this vector means the distance from the world to the blue point target
     class_filter: ''
-    min_confidence: 0.25
+    # Match the detector threshold so low-confidence cabinet controls can
+    # still receive diagnostic 3D points.
+    min_confidence: 0.08
     depth_radius: 3
     # Require a real local depth support; never accept one stray background pixel.
     depth_min_valid_count: 8
     depth_percentile: 35.0
     # H2 eye-in-hand press marker is near-field; reject the observed 0.422 m background.
-    press_max_depth_m: 0.30
+    press_max_depth_m: 0.30 # 0.3 means the press point is 30% down from the sticker's top edge
     depth_fallback: bbox
     depth_roi_scale: 0.55
     depth_expanded_roi_scale: 1.8
@@ -106,16 +114,17 @@ coordinate_projector:
     handle_depth_sticky_px: 45.0
     handle_mid_right_offset_m: 0.01
     # From the gravity-opposite sticker edge toward the ground-facing edge.
-    press_point_ground_ratio: 0.80
+    press_point_ground_ratio: 0.80 # 0.8 means the press point is 80% down from the sticker's top edge
     depth_scale: 0.001
     min_depth_m: 0.10
     max_depth_m: 5.0
     publish_invalid: false
     publish_target_pose: true
-    target_pose_orientation_xyzw: [0.0, 0.0, 0.0, 1.0]
-    publish_target_joint_state: true
+    target_pose_orientation_xyzw: [0.0, 0.0, 0.0, 1.0] # [0.0, 0.0, 0.0, 1.0] means no rotation
     publish_current_joint_state: true
-    publish_objects_ik_json: true
+    # Do not solve expensive IK for every cabinet diagnostic object.
+    # The selected red-sticker target still uses target_joint_state.
+    publish_objects_ik_json: false
     publish_failed_ik_solution: false
     ik_target_link: right_wrist_yaw_link
     ik_active_joints: 'right_shoulder_pitch_joint,right_shoulder_roll_joint,right_shoulder_yaw_joint,right_elbow_joint,right_wrist_roll_joint,right_wrist_pitch_joint,right_wrist_yaw_joint'
@@ -132,7 +141,8 @@ coordinate_projector:
     # Cache aligned depth frames and match the detector's original color stamp.
     # YOLO inference can finish >0.5 s after capture; never use the newest,
     # unrelated depth frame just because the matching frame is older.
-    depth_cache_size: 60
+    # Higher-resolution YOLOE can take longer; at 6 FPS this retains 25 s.
+    depth_cache_size: 150
     depth_sync_tolerance_sec: 0.20
     stale_depth_sec: 0.5
     transform_timeout_sec: 0.05

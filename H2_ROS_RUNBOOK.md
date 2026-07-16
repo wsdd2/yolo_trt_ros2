@@ -29,6 +29,10 @@ rsync -av --progress \
   --exclude build \
   --exclude install \
   --exclude log \
+  --exclude thirdparty \
+  --exclude '*.[rR][aA][rR]' \
+  --exclude '*.[pP][tT]' \
+  --exclude '*.[pP][tT][hH]' \
   --exclude __pycache__ \
   --exclude '*.pyc' \
   /mnt/e/MscapeTech/Foxy_ROS/ \

@@ -31,6 +31,10 @@ class YoloDetectorNode(Node):
         self.input_width = int(self.get_parameter('input_width').value)
         self.input_height = int(self.get_parameter('input_height').value)
         self.imgsz = int(self.get_parameter('imgsz').value)
+        imgsz_height = int(self.get_parameter('imgsz_height').value)
+        imgsz_width = int(self.get_parameter('imgsz_width').value)
+        if imgsz_height > 0 and imgsz_width > 0:
+            self.imgsz = [imgsz_height, imgsz_width]
         self.conf_thres = float(self.get_parameter('conf_thres').value)
         self.iou_thres = float(self.get_parameter('iou_thres').value)
         self.publish_debug_image = bool(self.get_parameter('publish_debug_image').value)
@@ -97,6 +101,8 @@ class YoloDetectorNode(Node):
         self.declare_parameter('input_width', 640)
         self.declare_parameter('input_height', 640)
         self.declare_parameter('imgsz', 640)
+        self.declare_parameter('imgsz_height', 0)
+        self.declare_parameter('imgsz_width', 0)
         self.declare_parameter('conf_thres', 0.25)
         self.declare_parameter('iou_thres', 0.45)
         self.declare_parameter('publish_debug_image', True)

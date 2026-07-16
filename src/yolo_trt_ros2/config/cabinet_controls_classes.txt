@@ -1,19 +1,16 @@
 # Electrical control cabinet YOLOE prompts.
 # Keep one visually distinct class per line to reduce duplicate detections.
 
+black cabinet door handle
 red push button
 green push button
 yellow push button
 black push button
-red indicator light
-green indicator light
-yellow indicator light
 square analog ammeter
 square analog voltmeter
 digital panel meter
 multi-color indicator panel
 black rotary selector switch
-rotary knob with pointer
 black rocker switch
 yellow toggle switch
 red toggle switch
