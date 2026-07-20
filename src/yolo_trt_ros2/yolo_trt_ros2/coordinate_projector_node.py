@@ -156,8 +156,11 @@ class UnitreeLowStateJointReader:
 class CoordinateProjectorNode(Node):
     """Project 2D detector centers into camera-frame 3D coordinates."""
 
-    def __init__(self):
-        super().__init__('coordinate_projector')
+    def __init__(self, subscribe_perception_inputs=True, parameter_overrides=None):
+        node_kwargs = {}
+        if parameter_overrides is not None:
+            node_kwargs['parameter_overrides'] = parameter_overrides
+        super().__init__('coordinate_projector', **node_kwargs)
         self._declare_parameters()
 
         self.objects_topic = self.get_parameter('objects_topic').value
@@ -170,6 +173,8 @@ class CoordinateProjectorNode(Node):
         self.current_joint_state_topic = self.get_parameter('current_joint_state_topic').value
         self.current_ee_point_topic = self.get_parameter('current_ee_point_topic').value
         self.objects_ik_topic = self.get_parameter('objects_ik_topic').value
+        self.pixel_query_topic = self.get_parameter('pixel_query_topic').value
+        self.pixel_query_result_topic = self.get_parameter('pixel_query_result_topic').value
         self.robot_status_topic = self.get_parameter('robot_status_topic').value
         self.target_frame = str(self.get_parameter('target_frame').value)
         self.handeye_npy_path = str(self.get_parameter('handeye_npy_path').value)
@@ -223,6 +228,7 @@ class CoordinateProjectorNode(Node):
         self.depth_scale = float(self.get_parameter('depth_scale').value)
         self.min_depth_m = float(self.get_parameter('min_depth_m').value)
         self.max_depth_m = float(self.get_parameter('max_depth_m').value)
+        self.pixel_query_max_depth_m = float(self.get_parameter('pixel_query_max_depth_m').value)
         self.publish_invalid = bool(self.get_parameter('publish_invalid').value)
         self.publish_target_pose = bool(self.get_parameter('publish_target_pose').value)
         self.publish_target_joint_state = bool(self.get_parameter('publish_target_joint_state').value)
@@ -233,6 +239,15 @@ class CoordinateProjectorNode(Node):
         self.depth_sync_tolerance_sec = float(self.get_parameter('depth_sync_tolerance_sec').value)
         self.depth_cache_size = int(self.get_parameter('depth_cache_size').value)
         self.transform_timeout_sec = float(self.get_parameter('transform_timeout_sec').value)
+        self.diagnostic_3d_log_enabled = bool(self.get_parameter('diagnostic_3d_log_enabled').value)
+        self.diagnostic_3d_log_interval_sec = max(
+            0.0,
+            float(self.get_parameter('diagnostic_3d_log_interval_sec').value),
+        )
+        self.diagnostic_3d_log_change_m = max(
+            1e-6,
+            float(self.get_parameter('diagnostic_3d_log_change_m').value),
+        )
         self.class_filter = set(self._get_string_list_parameter('class_filter'))
         self.pose_orientation_xyzw = self._get_float_list_parameter(
             'target_pose_orientation_xyzw',
@@ -268,6 +283,8 @@ class CoordinateProjectorNode(Node):
         self._ik_error = ''
         self._last_ik_warning_sec = 0.0
         self._last_depth_sync_warning_sec = 0.0
+        self._last_3d_diagnostic_log_sec = 0.0
+        self._last_3d_diagnostic_snapshot = None
         self._last_depth_handle_grasp = None
         self._frame_handle_reference = None
         self.latest_robot_status = None
@@ -289,16 +306,28 @@ class CoordinateProjectorNode(Node):
         self.current_joint_state_pub = self.create_publisher(JointState, self.current_joint_state_topic, 10)
         self.current_ee_point_pub = self.create_publisher(PointStamped, self.current_ee_point_topic, 10)
         self.objects_ik_pub = self.create_publisher(String, self.objects_ik_topic, 10)
+        self.pixel_query_result_pub = self.create_publisher(String, self.pixel_query_result_topic, 10)
 
-        self.create_subscription(Image, self.depth_topic, self._depth_callback, 10)
-        self.create_subscription(CameraInfo, self.camera_info_topic, self._camera_info_callback, 10)
-        self.create_subscription(Object2DArray, self.objects_topic, self._objects_callback, 10)
+        self.depth_sub = None
+        self.camera_info_sub = None
+        self.objects_sub = None
+        if subscribe_perception_inputs:
+            self.depth_sub = self.create_subscription(Image, self.depth_topic, self._depth_callback, 10)
+            self.camera_info_sub = self.create_subscription(
+                CameraInfo,
+                self.camera_info_topic,
+                self._camera_info_callback,
+                10,
+            )
+            self.objects_sub = self.create_subscription(Object2DArray, self.objects_topic, self._objects_callback, 10)
+        self.create_subscription(PointStamped, self.pixel_query_topic, self._pixel_query_callback, 10)
         self.create_subscription(RobotInspectionStatus, self.robot_status_topic, self._robot_status_callback, 10)
         self.create_timer(0.1, self._current_joint_timer_callback)
 
         self.get_logger().info(
-            'Coordinate projector started: objects=%s, depth=%s, camera_info=%s, target_frame=%s, handeye_mode=%s, handeye=%s'
+            'Coordinate projector started: input=%s, objects=%s, depth=%s, camera_info=%s, target_frame=%s, handeye_mode=%s, handeye=%s'
             % (
+                'ROS topics' if subscribe_perception_inputs else 'in-process RGB-D',
                 self.objects_topic,
                 self.depth_topic,
                 self.camera_info_topic,
@@ -319,6 +348,8 @@ class CoordinateProjectorNode(Node):
         self.declare_parameter('current_joint_state_topic', '/detector/current_joint_state')
         self.declare_parameter('current_ee_point_topic', '/detector/current_ee_point')
         self.declare_parameter('objects_ik_topic', '/detector/objects_ik_json')
+        self.declare_parameter('pixel_query_topic', '/detector/pixel_query')
+        self.declare_parameter('pixel_query_result_topic', '/detector/pixel_query_result_json')
         self.declare_parameter('robot_status_topic', '/robot/inspection_status')
         self.declare_parameter('target_frame', '')
         self.declare_parameter('handeye_npy_path', '')
@@ -361,6 +392,7 @@ class CoordinateProjectorNode(Node):
         self.declare_parameter('depth_scale', 0.001)
         self.declare_parameter('min_depth_m', 0.10)
         self.declare_parameter('max_depth_m', 5.0)
+        self.declare_parameter('pixel_query_max_depth_m', 1.2)
         self.declare_parameter('publish_invalid', False)
         self.declare_parameter('publish_target_pose', True)
         self.declare_parameter('publish_target_joint_state', False)
@@ -384,6 +416,9 @@ class CoordinateProjectorNode(Node):
         self.declare_parameter('depth_sync_tolerance_sec', 0.08)
         self.declare_parameter('depth_cache_size', 60)
         self.declare_parameter('transform_timeout_sec', 0.05)
+        self.declare_parameter('diagnostic_3d_log_enabled', True)
+        self.declare_parameter('diagnostic_3d_log_interval_sec', 5.0)
+        self.declare_parameter('diagnostic_3d_log_change_m', 0.001)
 
     def _get_string_list_parameter(self, name):
         value = self.get_parameter(name).value
@@ -616,17 +651,156 @@ class CoordinateProjectorNode(Node):
             self.get_logger().error('Failed to convert depth image: %s' % exc)
             return
 
+        self.ingest_depth(np.asarray(depth), depth_msg.header.stamp)
+
+    def ingest_depth(self, depth, stamp):
+        """Cache one in-memory aligned depth frame without ROS Image conversion."""
         depth_array = np.asarray(depth)
-        stamp_ns = self._stamp_to_ns(depth_msg.header.stamp)
+        stamp_ns = self._stamp_to_ns(stamp)
         self.latest_depth_stamp_ns = stamp_ns
         self.latest_depth = depth_array
         self.depth_cache.append((stamp_ns, depth_array))
 
     def _camera_info_callback(self, camera_info):
+        self.ingest_camera_info(camera_info)
+
+    def ingest_camera_info(self, camera_info):
+        """Set color intrinsics supplied by the in-process camera owner."""
         self.latest_camera_info = camera_info
+
+    def process_objects(self, objects_msg):
+        """Project an in-memory Object2DArray using the synchronized depth cache."""
+        self._objects_callback(objects_msg)
 
     def _robot_status_callback(self, msg):
         self.latest_robot_status = msg
+
+    def _pixel_query_callback(self, msg):
+        request_id = int(round(float(msg.point.z)))
+        u = float(msg.point.x)
+        v = float(msg.point.y)
+        result = {
+            'request_id': request_id,
+            'valid': False,
+            'pixel': [u, v],
+            'depth_m': None,
+            'depth_source': '',
+            'point_camera': None,
+            'point_world': None,
+            'point_target': None,
+            'source_frame': str(msg.header.frame_id),
+            'target_frame': self._output_frame_name(),
+            'message': '',
+        }
+
+        if self.latest_camera_info is None:
+            result['message'] = 'missing CameraInfo'
+            self._publish_pixel_query_result(result)
+            return
+
+        depth_match = self._select_depth_for_header(msg.header)
+        if depth_match is None:
+            result['message'] = 'no synchronized depth frame for selected image'
+            self._publish_pixel_query_result(result)
+            return
+
+        self.latest_depth_stamp_ns, self.latest_depth = depth_match
+        depth_result = None
+        used_radius = self.depth_radius
+        for radius in (self.depth_radius, max(self.depth_radius + 2, 6), max(self.depth_radius + 5, 10)):
+            depth_result = self._sample_depth_m(
+                u,
+                v,
+                max_depth_m=self.pixel_query_max_depth_m,
+                radius=radius,
+            )
+            if depth_result is not None:
+                used_radius = radius
+                break
+        if depth_result is None:
+            result['message'] = 'no valid foreground depth near selected pixel'
+            self._publish_pixel_query_result(result)
+            return
+
+        depth_m, valid_count = depth_result
+        try:
+            point_camera = self._deproject(u, v, depth_m)
+        except RuntimeError as exc:
+            result['message'] = str(exc)
+            self._publish_pixel_query_result(result)
+            return
+
+        point_world = point_camera
+        point_target = point_camera
+        target_frame = str(msg.header.frame_id)
+        transform_message = 'camera_frame'
+        if self.T_cam2hand is not None:
+            transformed = self._transform_eye_in_hand_with_pose(point_camera)
+            if transformed is None:
+                result['message'] = 'eye_in_hand_unavailable: %s' % (self._fk_error or 'missing joints/FK')
+                self._publish_pixel_query_result(result)
+                return
+            point_world, T_base_hand = transformed
+            point_target, target_message = self._action_target_for_detection(None, point_world, T_base_hand)
+            target_frame = self.handeye_target_frame or self.base_link or 'base_link'
+            transform_message = 'eye_in_hand_fk; ' + target_message
+        elif self.handeye_transform is not None:
+            point_world = self._apply_transform(self.handeye_transform, point_camera)
+            point_target = point_world
+            target_frame = self.handeye_target_frame or self.target_frame or 'base_link'
+            transform_message = 'handeye_npy'
+        elif self.target_frame:
+            transformed = self._transform_point(point_camera, msg.header.frame_id, self.target_frame)
+            if transformed is None:
+                result['message'] = 'TF transform unavailable'
+                self._publish_pixel_query_result(result)
+                return
+            point_world = transformed
+            point_target = point_world
+            target_frame = self.target_frame
+            transform_message = 'transformed'
+
+        result.update(
+            {
+                'valid': True,
+                'depth_m': float(depth_m),
+                'depth_source': 'pixel_patch_r%d_percentile' % int(used_radius),
+                'depth_valid_count': int(valid_count),
+                'point_camera': [float(value) for value in point_camera],
+                'point_world': [float(value) for value in point_world],
+                'point_target': [float(value) for value in point_target],
+                'target_frame': target_frame,
+                'message': transform_message,
+            }
+        )
+        self._publish_pixel_query_result(result)
+
+    def _publish_pixel_query_result(self, result):
+        msg = String()
+        msg.data = json.dumps(result, ensure_ascii=False, separators=(',', ':'))
+        self.pixel_query_result_pub.publish(msg)
+        if result.get('valid'):
+            self.get_logger().info(
+                'PIXEL_3D pixel=(%.1f,%.1f) depth_m=%.4f source=%s '
+                'point_world=%s point_target=%s'
+                % (
+                    float(result['pixel'][0]),
+                    float(result['pixel'][1]),
+                    float(result['depth_m']),
+                    result['depth_source'],
+                    self._format_xyz(result['point_world']),
+                    self._format_xyz(result['point_target']),
+                )
+            )
+        else:
+            self.get_logger().warn(
+                'PIXEL_3D failed pixel=(%.1f,%.1f): %s'
+                % (
+                    float(result['pixel'][0]),
+                    float(result['pixel'][1]),
+                    result.get('message', 'unknown error'),
+                )
+            )
 
     def _objects_callback(self, objects_msg):
         out_msg = Object3DArray()
@@ -682,6 +856,7 @@ class CoordinateProjectorNode(Node):
             ):
                 best_blue_obj = object_3d
 
+        self._log_3d_diagnostics_if_changed(out_msg.objects)
         self.objects_3d_pub.publish(out_msg)
         joints = self._current_joint_values()
         if joints:
@@ -696,6 +871,106 @@ class CoordinateProjectorNode(Node):
         if self.class_filter and obj.class_name not in self.class_filter:
             return False
         return True
+    def _publish_pixel_query_result(self, result):
+        msg = String()
+        msg.data = json.dumps(result, ensure_ascii=False, separators=(',', ':'))
+        self.pixel_query_result_pub.publish(msg)
+        if result.get('valid'):
+            self.get_logger().info(
+                'PIXEL_3D pixel=(%.1f,%.1f) depth_m=%.4f source=%s '
+                'point_world=%s point_target=%s'
+                % (
+                    float(result['pixel'][0]),
+                    float(result['pixel'][1]),
+                    float(result['depth_m']),
+                    result['depth_source'],
+                    self._format_xyz(result['point_world']),
+                    self._format_xyz(result['point_target']),
+                )
+            )
+        else:
+            self.get_logger().warn(
+                'PIXEL_3D failed pixel=(%.1f,%.1f): %s'
+                % (
+                    float(result['pixel'][0]),
+                    float(result['pixel'][1]),
+                    result.get('message', 'unknown error'),
+                )
+            )
+
+    def _log_3d_diagnostics_if_changed(self, objects):
+        if not self.diagnostic_3d_log_enabled:
+            return
+
+        change_m = self.diagnostic_3d_log_change_m
+        entries = []
+        for obj in objects:
+            if not obj.valid:
+                continue
+            detection = obj.detection
+            depth_source = 'unknown'
+            for part in str(obj.message).split(';'):
+                part = part.strip()
+                if part.startswith('depth_source='):
+                    depth_source = part.split('=', 1)[1].strip() or 'unknown'
+                    break
+            camera = (
+                float(obj.point_camera.x),
+                float(obj.point_camera.y),
+                float(obj.point_camera.z),
+            )
+            target = (
+                float(obj.point_target.x),
+                float(obj.point_target.y),
+                float(obj.point_target.z),
+            )
+            identity = (
+                str(detection.class_name),
+                int(round(float(detection.cx) / 8.0)),
+                int(round(float(detection.cy) / 8.0)),
+            )
+            quantized = tuple(
+                int(round(value / change_m))
+                for value in (float(obj.depth_m),) + camera + target
+            )
+            entries.append((identity, depth_source, quantized, obj))
+
+        entries.sort(key=lambda entry: (entry[0], entry[1], entry[2]))
+        snapshot = tuple(
+            (identity, depth_source, quantized)
+            for identity, depth_source, quantized, _ in entries
+        )
+        if snapshot == self._last_3d_diagnostic_snapshot:
+            return
+
+        now = time.monotonic()
+        if now - self._last_3d_diagnostic_log_sec < self.diagnostic_3d_log_interval_sec:
+            return
+
+        lines = ['3D_DIAG changed objects=%d' % len(entries)]
+        for identity, depth_source, _, obj in entries:
+            camera = obj.point_camera
+            target = obj.point_target
+            lines.append(
+                'class=%s center_px=(%.1f,%.1f) depth_m=%.4f depth_source=%s '
+                'point_camera=[%.4f %.4f %.4f] point_target=[%.4f %.4f %.4f]'
+                % (
+                    identity[0],
+                    float(obj.detection.cx),
+                    float(obj.detection.cy),
+                    float(obj.depth_m),
+                    depth_source,
+                    float(camera.x),
+                    float(camera.y),
+                    float(camera.z),
+                    float(target.x),
+                    float(target.y),
+                    float(target.z),
+                )
+            )
+        self.get_logger().info('\n'.join(lines))
+        self._last_3d_diagnostic_snapshot = snapshot
+        self._last_3d_diagnostic_log_sec = now
 
     def _depth_is_stale(self, objects_header):
         if self.stale_depth_sec <= 0.0 or self.latest_depth_stamp_ns <= 0:
@@ -944,17 +1219,18 @@ class CoordinateProjectorNode(Node):
             return None
         return float(target_depth), int(np.count_nonzero(inliers))
 
-    def _sample_depth_m(self, u, v, max_depth_m=None):
+    def _sample_depth_m(self, u, v, max_depth_m=None, radius=None):
         depth = self.latest_depth
         if depth is None or depth.size == 0:
             return None
 
         h, w = depth.shape[:2]
         u_depth, v_depth = self._map_pixel_to_depth_image(u, v, w, h)
-        x0 = max(0, u_depth - self.depth_radius)
-        x1 = min(w, u_depth + self.depth_radius + 1)
-        y0 = max(0, v_depth - self.depth_radius)
-        y1 = min(h, v_depth + self.depth_radius + 1)
+        sample_radius = self.depth_radius if radius is None else max(0, int(radius))
+        x0 = max(0, u_depth - sample_radius)
+        x1 = min(w, u_depth + sample_radius + 1)
+        y0 = max(0, v_depth - sample_radius)
+        y1 = min(h, v_depth + sample_radius + 1)
         patch = np.asarray(depth[y0:y1, x0:x1])
         if patch.size == 0:
             return None

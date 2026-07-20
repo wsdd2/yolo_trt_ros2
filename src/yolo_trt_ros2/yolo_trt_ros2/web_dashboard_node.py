@@ -94,6 +94,25 @@ INDEX_HTML = """<!doctype html>
       gap: 8px;
       white-space: nowrap;
     }
+    .pick-controls {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .pick-button {
+      padding: 5px 10px;
+      border: 1px solid var(--accent);
+      border-radius: 5px;
+      background: transparent;
+      color: var(--accent);
+      cursor: pointer;
+      font: inherit;
+    }
+    .pick-button.active {
+      background: var(--accent);
+      color: #071019;
+      font-weight: 700;
+    }
     .dot {
       width: 9px;
       height: 9px;
@@ -108,6 +127,24 @@ INDEX_HTML = """<!doctype html>
       min-height: 360px;
       background: #050708;
       overflow: hidden;
+    }
+    .preview.pick-mode,
+    .preview.pick-mode .bbox,
+    .preview.pick-mode .grasp-point,
+    .preview.pick-mode .mid-air-point {
+      cursor: crosshair;
+    }
+    .pick-marker {
+      position: absolute;
+      z-index: 18;
+      width: 22px;
+      height: 22px;
+      margin-left: -11px;
+      margin-top: -11px;
+      border: 2px solid #ffffff;
+      border-radius: 50%;
+      box-shadow: 0 0 0 2px #ff365f;
+      pointer-events: none;
     }
     .video {
       width: 100%;
@@ -266,7 +303,10 @@ INDEX_HTML = """<!doctype html>
     <section class="video-wrap">
       <div class="section-head">
         <span>debug image stream</span>
-        <span id="imageMeta" class="mono">--</span>
+        <span class="pick-controls">
+          <button id="pick3dButton" class="pick-button" type="button">选取3D点 (X)</button>
+          <span id="imageMeta" class="mono">--</span>
+        </span>
       </div>
       <div id="preview" class="preview">
         <img id="stream" class="video" src="/stream.mjpg" alt="debug image stream">
@@ -313,6 +353,10 @@ INDEX_HTML = """<!doctype html>
     const stamp = h => h && h.stamp ? `${h.stamp.sec}.${String(h.stamp.nanosec).padStart(9, "0")}` : "--";
     const tracks = new Map();
     let latestData = null;
+    let pick3dMode = false;
+    let pendingPickRequestId = null;
+    let handledPickRequestId = null;
+    let lastPickedPixel = null;
 
     function iou(a, b) {
       const ix1 = Math.max(a[0], b[0]);
@@ -405,6 +449,56 @@ INDEX_HTML = """<!doctype html>
       area.select();
       document.execCommand("copy");
       document.body.removeChild(area);
+    }
+
+    function setPick3dMode(enabled) {
+      pick3dMode = Boolean(enabled);
+      document.getElementById("preview").classList.toggle("pick-mode", pick3dMode);
+      const button = document.getElementById("pick3dButton");
+      button.classList.toggle("active", pick3dMode);
+      button.textContent = pick3dMode ? "点击画面取点 (Esc取消)" : "选取3D点 (X)";
+    }
+
+    async function handlePick3dResult(result) {
+      if (!result || !Number.isFinite(Number(result.request_id))) return;
+      const requestId = Number(result.request_id);
+      if (handledPickRequestId === requestId) return;
+      handledPickRequestId = requestId;
+      pendingPickRequestId = null;
+      const copy = document.getElementById("copy");
+      if (!result.valid || !result.point_world) {
+        copy.textContent = `3D取点失败: ${result.message || "unknown error"}`;
+        setTimeout(() => { copy.textContent = ""; }, 3000);
+        return;
+      }
+      lastPickedPixel = result.pixel;
+      const text = xyzText(result.point_world);
+      await copyText(text);
+      copy.textContent =
+        `copied foreground ${text} | R_ee ${xyzText(result.point_target)} | depth ${fmt(result.depth_m, 4)}`;
+      setTimeout(() => { copy.textContent = ""; }, 4000);
+      if (latestData) renderOverlay(latestData);
+    }
+
+    async function queryPick3d(u, v) {
+      const copy = document.getElementById("copy");
+      copy.textContent = `querying pixel ${fmt(u, 1)} ${fmt(v, 1)} ...`;
+      try {
+        const response = await fetch("/api/pick3d", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ u, v })
+        });
+        const result = await response.json();
+        if (!result.accepted) {
+          copy.textContent = `3D取点失败: ${result.message || "request rejected"}`;
+          return;
+        }
+        pendingPickRequestId = Number(result.request_id);
+        if (!result.pending) await handlePick3dResult(result);
+      } catch (err) {
+        copy.textContent = `3D取点请求失败: ${err}`;
+      }
     }
 
     function renderOverlay(data) {
@@ -588,6 +682,13 @@ INDEX_HTML = """<!doctype html>
           overlay.appendChild(midMarker);
         }
       });
+      if (lastPickedPixel && lastPickedPixel.length === 2) {
+        const marker = document.createElement("div");
+        marker.className = "pick-marker";
+        marker.style.left = `${lastPickedPixel[0] * sx}px`;
+        marker.style.top = `${lastPickedPixel[1] * sy}px`;
+        overlay.appendChild(marker);
+      }
     }
 
     function setRows(tbody, rows, emptyCols) {
@@ -636,6 +737,15 @@ INDEX_HTML = """<!doctype html>
         document.getElementById("imageMeta").textContent = `${data.image.width || "--"}x${data.image.height || "--"} q=${data.image.jpeg_quality}`;
         document.getElementById("objectMeta").textContent = `${data.objects2d.objects.length} objects`;
         renderOverlay(data);
+        const pickResult = data.pixel_query_result;
+        if (
+          pickResult &&
+          pendingPickRequestId !== null &&
+          Number(pickResult.request_id) !== handledPickRequestId &&
+          Number(pickResult.request_id) === pendingPickRequestId
+        ) {
+          await handlePick3dResult(pickResult);
+        }
         const objectRows = data.objects2d.objects.map(o => {
           const tr = document.createElement("tr");
           [o.class_name, fmt(o.confidence, 2), `${o.xmin},${o.ymin},${o.xmax},${o.ymax}`, `${fmt(o.cx, 1)},${fmt(o.cy, 1)}`]
@@ -650,8 +760,23 @@ INDEX_HTML = """<!doctype html>
         setRows(document.getElementById("objects2d"), objectRows, 4);
         const valid3d = data.objects3d.objects.filter(o => o.valid);
         const best3d = valid3d.find(o => isBluePress(o)) || valid3d[0] || data.objects3d.objects[0];
-        document.getElementById("targetMeta").textContent = best3d ? (best3d.target_frame || "--") : "--";
-        if (best3d) {
+        const picked3d = data.pixel_query_result;
+        document.getElementById("targetMeta").textContent =
+          picked3d && picked3d.valid ? (picked3d.target_frame || "--") :
+          (best3d ? (best3d.target_frame || "--") : "--");
+        if (picked3d && picked3d.valid) {
+          kv(document.getElementById("target3d"), [
+            ["kind", "selected foreground pixel"],
+            ["pixel", `${fmt(picked3d.pixel[0], 1)} ${fmt(picked3d.pixel[1], 1)}`],
+            ["depth_m", fmt(picked3d.depth_m, 4)],
+            ["depth_source", picked3d.depth_source || "--"],
+            ["point_camera", xyzText(picked3d.point_camera)],
+            ["point_world (copied)", xyzText(picked3d.point_world)],
+            ["R_ee target", xyzText(picked3d.point_target)],
+            ["target_frame", picked3d.target_frame || "--"],
+            ["message", picked3d.message || "--"]
+          ]);
+        } else if (best3d) {
           kv(document.getElementById("target3d"), [
             ["class", best3d.detection.class_name],
             ["confidence", fmt(best3d.detection.confidence, 3)],
@@ -717,6 +842,47 @@ INDEX_HTML = """<!doctype html>
       copy.textContent = `copied current XYZ ${text}`;
       setTimeout(() => { copy.textContent = ""; }, 1800);
     });
+    document.getElementById("target3d").addEventListener("click", async () => {
+      const result = latestData && latestData.pixel_query_result;
+      if (!result || !result.valid || !result.point_world) return;
+      const text = xyzText(result.point_world);
+      await copyText(text);
+      const copy = document.getElementById("copy");
+      copy.textContent = `copied selected foreground ${text}`;
+      setTimeout(() => { copy.textContent = ""; }, 1800);
+    });
+    document.getElementById("pick3dButton").addEventListener("click", () => {
+      setPick3dMode(!pick3dMode);
+    });
+    document.getElementById("preview").addEventListener("click", ev => {
+      if (!pick3dMode || !latestData) return;
+      ev.preventDefault();
+      ev.stopImmediatePropagation();
+      const stream = document.getElementById("stream");
+      const rect = stream.getBoundingClientRect();
+      if (
+        ev.clientX < rect.left || ev.clientX > rect.right ||
+        ev.clientY < rect.top || ev.clientY > rect.bottom
+      ) return;
+      const srcW = latestData.image.width || stream.naturalWidth || 1280;
+      const srcH = latestData.image.height || stream.naturalHeight || 720;
+      const u = (ev.clientX - rect.left) * srcW / Math.max(1, rect.width);
+      const v = (ev.clientY - rect.top) * srcH / Math.max(1, rect.height);
+      lastPickedPixel = [u, v];
+      setPick3dMode(false);
+      renderOverlay(latestData);
+      queryPick3d(u, v);
+    }, true);
+    document.addEventListener("keydown", ev => {
+      if (ev.ctrlKey || ev.metaKey || ev.altKey) return;
+      if (ev.key.toLowerCase() === "x") {
+        ev.preventDefault();
+        setPick3dMode(!pick3dMode);
+      } else if (ev.key === "Escape" && pick3dMode) {
+        ev.preventDefault();
+        setPick3dMode(false);
+      }
+    });
     setInterval(refresh, 300);
     refresh();
   </script>
@@ -766,13 +932,16 @@ class DashboardState:
         self.current_joint_state = None
         self.current_ee_point = None
         self.objects_ik_json = None
+        self.pixel_query_result = None
+        self.pixel_query_sequence = 0
+        self.pixel_query_condition = threading.Condition(self.lock)
         self.robot_status = None
 
 
 class WebDashboardNode(Node):
     """Serve a tiny browser dashboard for detector video and perception state."""
 
-    def __init__(self):
+    def __init__(self, subscribe_debug_image=True):
         super().__init__('web_dashboard')
         self._declare_parameters()
 
@@ -790,13 +959,18 @@ class WebDashboardNode(Node):
         self.current_joint_state_topic = self.get_parameter('current_joint_state_topic').value
         self.current_ee_point_topic = self.get_parameter('current_ee_point_topic').value
         self.objects_ik_topic = self.get_parameter('objects_ik_topic').value
+        self.pixel_query_topic = self.get_parameter('pixel_query_topic').value
+        self.pixel_query_result_topic = self.get_parameter('pixel_query_result_topic').value
         self.robot_status_topic = self.get_parameter('robot_status_topic').value
 
         self.bridge = CvBridge()
         self.state = DashboardState()
         self.state.jpeg_quality = max(1, min(100, self.jpeg_quality))
+        self.pixel_query_pub = self.create_publisher(PointStamped, self.pixel_query_topic, 10)
 
-        self.create_subscription(Image, self.debug_image_topic, self._image_callback, 10)
+        self.debug_image_sub = None
+        if subscribe_debug_image:
+            self.debug_image_sub = self.create_subscription(Image, self.debug_image_topic, self._image_callback, 10)
         self.create_subscription(Object2DArray, self.objects_topic, self._objects_callback, 10)
         self.create_subscription(Object3DArray, self.objects_3d_topic, self._objects3d_callback, 10)
         self.create_subscription(PointStamped, self.target_point_topic, self._target_point_callback, 10)
@@ -805,6 +979,7 @@ class WebDashboardNode(Node):
         self.create_subscription(JointState, self.current_joint_state_topic, self._current_joint_state_callback, 10)
         self.create_subscription(PointStamped, self.current_ee_point_topic, self._current_ee_point_callback, 10)
         self.create_subscription(String, self.objects_ik_topic, self._objects_ik_callback, 10)
+        self.create_subscription(String, self.pixel_query_result_topic, self._pixel_query_result_callback, 10)
         self.create_subscription(RobotInspectionStatus, self.robot_status_topic, self._robot_status_callback, 10)
 
         handler_cls = self._make_handler()
@@ -833,11 +1008,21 @@ class WebDashboardNode(Node):
         self.declare_parameter('current_joint_state_topic', '/detector/current_joint_state')
         self.declare_parameter('current_ee_point_topic', '/detector/current_ee_point')
         self.declare_parameter('objects_ik_topic', '/detector/objects_ik_json')
+        self.declare_parameter('pixel_query_topic', '/detector/pixel_query')
+        self.declare_parameter('pixel_query_result_topic', '/detector/pixel_query_result_json')
         self.declare_parameter('robot_status_topic', '/robot/inspection_status')
 
     def _image_callback(self, msg):
         try:
             image = self.bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
+        except Exception as exc:
+            self.get_logger().warn('Failed to convert dashboard image: %s' % exc)
+            return
+        self.ingest_bgr_image(image, msg.header)
+
+    def ingest_bgr_image(self, image, header):
+        """Encode an in-memory BGR preview without publishing a ROS Image."""
+        try:
             ok, encoded = cv2.imencode('.jpg', image, [int(cv2.IMWRITE_JPEG_QUALITY), self.state.jpeg_quality])
         except Exception as exc:
             self.get_logger().warn('Failed to encode dashboard image: %s' % exc)
@@ -848,9 +1033,9 @@ class WebDashboardNode(Node):
 
         with self.state.frame_condition:
             self.state.jpeg = encoded.tobytes()
-            self.state.image_header = msg.header
-            self.state.image_width = int(msg.width)
-            self.state.image_height = int(msg.height)
+            self.state.image_header = header
+            self.state.image_width = int(image.shape[1])
+            self.state.image_height = int(image.shape[0])
             self.state.last_update_time = time.time()
             self.state.frame_condition.notify_all()
 
@@ -899,6 +1084,17 @@ class WebDashboardNode(Node):
             self.state.objects_ik_json = payload
             self.state.last_update_time = time.time()
 
+    def _pixel_query_result_callback(self, msg):
+        try:
+            payload = json.loads(msg.data) if msg.data else None
+        except Exception as exc:
+            self.get_logger().warn('Failed to parse pixel query result JSON: %s' % exc)
+            return
+        with self.state.pixel_query_condition:
+            self.state.pixel_query_result = payload
+            self.state.last_update_time = time.time()
+            self.state.pixel_query_condition.notify_all()
+
     def _robot_status_callback(self, msg):
         with self.state.lock:
             self.state.robot_status = msg
@@ -907,6 +1103,7 @@ class WebDashboardNode(Node):
     def _make_handler(self):
         state = self.state
         frame_timeout_sec = self.frame_timeout_sec
+        pixel_query_pub = self.pixel_query_pub
 
         class DashboardHandler(BaseHTTPRequestHandler):
             protocol_version = 'HTTP/1.1'
@@ -920,6 +1117,12 @@ class WebDashboardNode(Node):
                     return
                 if self.path.startswith('/stream.mjpg'):
                     self._stream_mjpeg()
+                    return
+                self.send_error(404, 'not found')
+
+            def do_POST(self):
+                if self.path.startswith('/api/pick3d'):
+                    self._handle_pick3d()
                     return
                 self.send_error(404, 'not found')
 
@@ -938,6 +1141,65 @@ class WebDashboardNode(Node):
             def _send_json(self, payload):
                 data = json.dumps(payload, ensure_ascii=False).encode('utf-8')
                 self._send_bytes(data, 'application/json; charset=utf-8')
+
+            def _handle_pick3d(self):
+                try:
+                    length = min(65536, max(0, int(self.headers.get('Content-Length', '0'))))
+                    payload = json.loads(self.rfile.read(length).decode('utf-8'))
+                    u = float(payload['u'])
+                    v = float(payload['v'])
+                except Exception as exc:
+                    self._send_json({'accepted': False, 'message': 'invalid request: %s' % exc})
+                    return
+
+                with state.lock:
+                    header = state.image_header
+                    width = int(state.image_width)
+                    height = int(state.image_height)
+                    if header is None or width <= 0 or height <= 0:
+                        self._send_json({'accepted': False, 'message': 'no dashboard image available'})
+                        return
+                    u = max(0.0, min(float(width - 1), u))
+                    v = max(0.0, min(float(height - 1), v))
+                    state.pixel_query_sequence += 1
+                    request_id = int(state.pixel_query_sequence)
+                    stamp_sec = int(header.stamp.sec)
+                    stamp_nanosec = int(header.stamp.nanosec)
+                    frame_id = str(header.frame_id)
+
+                query = PointStamped()
+                query.header.stamp.sec = stamp_sec
+                query.header.stamp.nanosec = stamp_nanosec
+                query.header.frame_id = frame_id
+                query.point.x = u
+                query.point.y = v
+                query.point.z = float(request_id)
+                pixel_query_pub.publish(query)
+
+                deadline = time.monotonic() + 3.0
+                result = None
+                with state.pixel_query_condition:
+                    while time.monotonic() < deadline:
+                        candidate = state.pixel_query_result
+                        if isinstance(candidate, dict) and int(candidate.get('request_id', -1)) == request_id:
+                            result = dict(candidate)
+                            break
+                        state.pixel_query_condition.wait(timeout=max(0.0, deadline - time.monotonic()))
+
+                if result is None:
+                    self._send_json(
+                        {
+                            'accepted': True,
+                            'request_id': request_id,
+                            'valid': False,
+                            'pending': True,
+                            'pixel': [u, v],
+                            'message': 'query accepted; result pending',
+                        }
+                    )
+                    return
+                result['accepted'] = True
+                self._send_json(result)
 
             def _stream_mjpeg(self):
                 self.send_response(200)
@@ -985,6 +1247,7 @@ class WebDashboardNode(Node):
                         'target_joint_state': joint_state_to_dict(state.target_joint_state),
                         'current_joint_state': joint_state_to_dict(state.current_joint_state),
                         'current_ee_point': point_stamped_to_dict(state.current_ee_point),
+                        'pixel_query_result': state.pixel_query_result,
                     }
 
         return DashboardHandler

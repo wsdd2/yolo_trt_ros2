@@ -1,8 +1,7 @@
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, ExecuteProcess
-from launch.conditions import IfCondition
+from launch.conditions import IfCondition, UnlessCondition
 from launch.substitutions import EnvironmentVariable, LaunchConfiguration
-from launch_ros.actions import Node
 from ament_index_python.packages import get_package_share_directory
 
 import os
@@ -17,10 +16,10 @@ def generate_launch_description():
         default_value=default_config,
         description='Path to detector and coordinate projector parameter YAML file.',
     )
-    use_direct_camera_arg = DeclareLaunchArgument(
-        'use_direct_camera',
-        default_value='true',
-        description='Start direct RealSense RGB-D publisher inside this launch.',
+    web_ui_arg = DeclareLaunchArgument(
+        'webUI',
+        default_value='false',
+        description='Enable the in-process HTTP WebUI and preview generation.',
     )
     dex1_tip_arg = DeclareLaunchArgument(
         'dex1_tip_from_wrist_xyz',
@@ -38,69 +37,49 @@ def generate_launch_description():
         description='Existing hand-eye calibration mount offset from right_wrist_yaw_link, meters.',
     )
 
-    direct_camera_node = Node(
-        package='yolo_trt_ros2',
-        executable='direct_realsense_node',
-        name='direct_realsense',
-        output='screen',
-        parameters=[LaunchConfiguration('config_file')],
-        condition=IfCondition(LaunchConfiguration('use_direct_camera')),
-    )
-
-    detector_node = Node(
-        package='yolo_trt_ros2',
-        executable='yolo_detector_node',
-        name='yolo_detector',
-        output='screen',
-        parameters=[LaunchConfiguration('config_file')],
-    )
-
-    # Use `python3 -m` for coordinate_projector to avoid setuptools console-script
-    # metadata failures observed on the H2 system Python environment.
-    coordinate_node = ExecuteProcess(
-        cmd=[
-            '/usr/bin/python3',
-            '-m',
-            'yolo_trt_ros2.coordinate_projector_node',
-            '--ros-args',
-            '-r',
-            '__node:=coordinate_projector',
-            '--params-file',
-            LaunchConfiguration('config_file'),
-            '-p',
-            ['dex1_tip_from_wrist_xyz:=', LaunchConfiguration('dex1_tip_from_wrist_xyz')],
-            '-p',
-            ['ik_end_effector_offset_xyz:=', LaunchConfiguration('handeye_mount_offset_from_wrist_xyz')],
-            '-p',
-            ['blue_point_target_world_offset_xyz:=', LaunchConfiguration('blue_point_target_world_offset_xyz')],
-            '-p',
-            ['handeye_mount_offset_from_wrist_xyz:=', LaunchConfiguration('handeye_mount_offset_from_wrist_xyz')],
+    # Global ROS parameter overrides are harmless for the other in-process
+    # nodes: only coordinate_projector declares these parameter names.
+    ros_arguments = [
+        '--ros-args',
+        '--params-file',
+        LaunchConfiguration('config_file'),
+        '-p',
+        ['dex1_tip_from_wrist_xyz:=', LaunchConfiguration('dex1_tip_from_wrist_xyz')],
+        '-p',
+        ['ik_end_effector_offset_xyz:=', LaunchConfiguration('handeye_mount_offset_from_wrist_xyz')],
+        '-p',
+        ['blue_point_target_world_offset_xyz:=', LaunchConfiguration('blue_point_target_world_offset_xyz')],
+        '-p',
+        ['handeye_mount_offset_from_wrist_xyz:=', LaunchConfiguration('handeye_mount_offset_from_wrist_xyz')],
+    ]
+    process_env = {
+        'LD_LIBRARY_PATH': [
+            '/opt/ros/humble/lib:',
+            EnvironmentVariable('LD_LIBRARY_PATH', default_value=''),
         ],
-        additional_env={
-            'LD_LIBRARY_PATH': [
-                '/opt/ros/humble/lib:',
-                EnvironmentVariable('LD_LIBRARY_PATH', default_value=''),
-            ],
-        },
+    }
+    process_prefix = ['/usr/bin/python3', '-m', 'yolo_trt_ros2.integrated_perception_node']
+
+    integrated_node = ExecuteProcess(
+        cmd=process_prefix + ros_arguments,
+        additional_env=process_env,
         output='screen',
+        condition=UnlessCondition(LaunchConfiguration('webUI')),
     )
 
-    web_dashboard_node = Node(
-        package='yolo_trt_ros2',
-        executable='web_dashboard_node',
-        name='web_dashboard',
+    integrated_node_with_web = ExecuteProcess(
+        cmd=process_prefix + ['--webUI'] + ros_arguments,
+        additional_env=process_env,
         output='screen',
-        parameters=[LaunchConfiguration('config_file')],
+        condition=IfCondition(LaunchConfiguration('webUI')),
     )
 
     return LaunchDescription([
         config_arg,
-        use_direct_camera_arg,
+        web_ui_arg,
         dex1_tip_arg,
         blue_point_offset_arg,
         handeye_mount_offset_arg,
-        direct_camera_node,
-        detector_node,
-        coordinate_node,
-        web_dashboard_node,
+        integrated_node,
+        integrated_node_with_web,
     ])

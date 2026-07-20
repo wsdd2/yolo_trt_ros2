@@ -16,7 +16,7 @@ from yolo_trt_ros2.backends.mock_backend import MockBackend
 class YoloDetectorNode(Node):
     """Small ROS2 Foxy detector node with a swappable inference backend."""
 
-    def __init__(self):
+    def __init__(self, subscribe_image=True, enable_debug_output=None):
         super().__init__('yolo_detector')
 
         self._declare_parameters()
@@ -38,6 +38,8 @@ class YoloDetectorNode(Node):
         self.conf_thres = float(self.get_parameter('conf_thres').value)
         self.iou_thres = float(self.get_parameter('iou_thres').value)
         self.publish_debug_image = bool(self.get_parameter('publish_debug_image').value)
+        if enable_debug_output is not None:
+            self.publish_debug_image = bool(enable_debug_output)
         self.backend_name = str(self.get_parameter('backend').value).lower()
         self.device = str(self.get_parameter('device').value)
         self.prompt_free = bool(self.get_parameter('prompt_free').value)
@@ -73,20 +75,29 @@ class YoloDetectorNode(Node):
         self.backend = self._create_backend()
 
         self.objects_pub = self.create_publisher(Object2DArray, self.objects_topic, 10)
-        self.debug_pub = self.create_publisher(Image, self.debug_image_topic, 10)
-        self.image_sub = self.create_subscription(
-            Image,
-            self.image_topic,
-            self._image_callback,
-            # Inference is slower than the camera. A deep queue makes YOLO
-            # process old color frames whose matching depth has already gone.
-            # Keep only the newest frame instead of accumulating latency.
-            1,
-        )
+        self.debug_pub = None
+        if self.publish_debug_image and subscribe_image:
+            self.debug_pub = self.create_publisher(Image, self.debug_image_topic, 10)
+        self.image_sub = None
+        if subscribe_image:
+            self.image_sub = self.create_subscription(
+                Image,
+                self.image_topic,
+                self._image_callback,
+                # Inference is slower than the camera. A deep queue makes YOLO
+                # process old color frames whose matching depth has already gone.
+                # Keep only the newest frame instead of accumulating latency.
+                1,
+            )
 
         self.get_logger().info(
-            'YOLO detector started: backend=%s, image_topic=%s, objects_topic=%s'
-            % (self.backend_name, self.image_topic, self.objects_topic)
+            'YOLO detector started: backend=%s, input=%s, objects_topic=%s, debug=%s'
+            % (
+                self.backend_name,
+                self.image_topic if subscribe_image else 'in-process RGB',
+                self.objects_topic,
+                self.publish_debug_image,
+            )
         )
 
     def _declare_parameters(self):
@@ -212,11 +223,19 @@ class YoloDetectorNode(Node):
             self.get_logger().error('Failed to convert ROS Image to OpenCV: %s' % exc)
             return
 
+        _objects_msg, debug_image = self.process_frame(bgr_image, image_msg.header)
+        if debug_image is not None and self.debug_pub is not None:
+            debug_msg = self.bridge.cv2_to_imgmsg(debug_image, encoding='bgr8')
+            debug_msg.header = image_msg.header
+            self.debug_pub.publish(debug_msg)
+
+    def process_frame(self, bgr_image, header, publish_objects=True):
+        """Run detection on an in-memory BGR frame and publish only Object2D."""
         try:
             detections = self.backend.infer(bgr_image)
         except Exception as exc:
             self.get_logger().error('Backend inference failed: %s' % exc)
-            return
+            return None, None
         if self.detect_blue_point:
             # Legacy blue-marker mode: HSV owns the target and replaces any
             # model-native press detections.
@@ -241,14 +260,14 @@ class YoloDetectorNode(Node):
         detections = self._attach_handle_grasp_edges(bgr_image, detections)
         detections = self._smooth_detection_rois(detections)
 
-        objects_msg = self._build_objects_msg(image_msg.header, detections)
-        self.objects_pub.publish(objects_msg)
+        objects_msg = self._build_objects_msg(header, detections)
+        if publish_objects:
+            self.objects_pub.publish(objects_msg)
 
+        debug_image = None
         if self.publish_debug_image:
             debug_image = self._draw_debug_image(bgr_image.copy(), detections)
-            debug_msg = self.bridge.cv2_to_imgmsg(debug_image, encoding='bgr8')
-            debug_msg.header = image_msg.header
-            self.debug_pub.publish(debug_msg)
+        return objects_msg, debug_image
 
     def _build_objects_msg(self, header, detections):
         msg = Object2DArray()

@@ -16,7 +16,8 @@ offline deployment.
 - `unitree_sdk2_python/`: SDK path currently bootstrapped directly by
   `coordinate_projector_node.py`.
 - `handle_recognition/minimal_test/handle_recognition/`: direct RealSense
-  adapter imported by `direct_realsense_node.py`.
+  adapter imported by `integrated_perception_node.py` and the legacy
+  `direct_realsense_node.py`.
 - `robot_kinematics/`: URDF FK/IK fallback backend.
 - `unitree_ros/robots/h2_description/`: fallback H2 URDF and meshes.
 

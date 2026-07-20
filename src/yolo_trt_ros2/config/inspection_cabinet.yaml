@@ -1,3 +1,11 @@
+# Cabinet multi-control perception profile (validate on direct script first).
+# Diff vs inspection_perception.yaml:
+#   - prompt_free: false + cabinet class list
+#   - detect_blue_point: false
+#   - best_handle_only / handle filters off
+# After direct validation, point yoloe_classes_path at the private copy of
+# cabinet_controls_classes.example.txt on the H2.
+
 direct_realsense:
   ros__parameters:
     workspace_root: /home/unitree/MscapeTech
@@ -8,16 +16,14 @@ direct_realsense:
     depth_frame_id: camera_color_optical_frame
     width: 1280
     height: 720
-    # YOLOE cabinet inference is much slower than the camera. Six FPS keeps
-    # an exact RGB-D history long enough without a large memory cache.
-    fps: 6
+    fps: 30
     depth_width: 640
     depth_height: 480
-    depth_fps: 6
+    depth_fps: 30
     cam_index: 0
     cam_serial: ''
     frame_timeout_ms: 1000
-    publish_period_sec: 0.1667
+    publish_period_sec: 0.033
     restart_on_timeout_count: 30
 
 yolo_detector:
@@ -27,41 +33,25 @@ yolo_detector:
     debug_image_topic: /detector/debug_image
     backend: yoloe
     model_path: /home/unitree/MscapeTech/models/yoloe-11s-seg.pt
-    mobileclip_path: /home/unitree/MscapeTech/models/mobileclip_blt.ts
+    mobileclip_path: ''
     model_kind: yoloe
-    # Explicit open-vocabulary classes for the electrical control cabinet.
-    yoloe_classes_path: /home/unitree/MscapeTech/Foxy_ROS/src/yolo_trt_ros2/config/cabinet_controls_classes.txt
+    # Copy cabinet_controls_classes.example.txt -> config/private/yoloe_classes.txt
+    yoloe_classes_path: /home/unitree/MscapeTech/Foxy_ROS/src/yolo_trt_ros2/config/private/yoloe_classes.txt
     prompts: ''
     prompt_free: false
     best_handle_only: false
     filter_prompt_free_handles: false
-    # Keep the red-sticker opening target while YOLOE also detects cabinet controls.
-    detect_blue_point: true
-    blue_point_class_name: red sticker push point
-    press_point_mode: red_sticker
-    # Detector publishes the geometric center; projector applies gravity direction.
-    press_point_vertical_ratio: 0.50
+    detect_blue_point: false
+    blue_point_class_name: blue push point
     blue_point_min_area: 40.0
     blue_point_max_area_ratio: 0.02
-    # Three-frame trailing mean suppresses ROI jitter while limiting eye-in-hand lag.
-    # Reset the history immediately when the raw center jumps more than 40 px.
-    roi_mean_filter_enabled: true
-    roi_mean_filter_window: 3
-    roi_mean_filter_max_jump_px: 40.0
-    roi_mean_filter_max_missed: 2
-    conf_thres: 0.08
+    conf_thres: 0.15
     iou_thres: 0.45
     imgsz: 640
-    # Preserve the 1280x720 camera detail for small cabinet controls.
-    # Ultralytics pads height to the model stride internally.
-    imgsz_height: 736
-    imgsz_width: 1280
     device: ''
-    # Standalone detector honors this value. Integrated perception additionally
-    # requires --webUI; without it no preview is drawn, encoded or published.
     publish_debug_image: true
 
-coordinate_projector:   
+coordinate_projector:
   ros__parameters:
     objects_topic: /detector/objects
     depth_topic: /camera/aligned_depth_to_color/image_raw
@@ -71,10 +61,7 @@ coordinate_projector:
     target_pose_topic: /detector/target_pose
     target_joint_state_topic: /detector/target_joint_state
     current_joint_state_topic: /detector/current_joint_state
-    current_ee_point_topic: /detector/current_ee_point
     objects_ik_topic: /detector/objects_ik_json
-    pixel_query_topic: /detector/pixel_query
-    pixel_query_result_topic: /detector/pixel_query_result_json
     robot_status_topic: /robot/inspection_status
     target_frame: ''
     handeye_mode: eye-in-hand
@@ -94,22 +81,16 @@ coordinate_projector:
     fk_backend: xr_pinocchio
     h2_xr_scripts_dir: /home/unitree/H2_joint_cartesian/scripts
     handeye_mount_offset_from_wrist_xyz: [0.05, 0.0, 0.0]
-    dex1_tip_from_wrist_xyz: [0.12, 0.01, 0.012] # this vector means the distance from the wrist to the dex1 tip 如果偏左，要对y轴取负值
-    blue_point_target_world_offset_xyz: [0.0, 0.001, -0.004] # this vector means the distance from the world to the blue point target
+    dex1_tip_from_wrist_xyz: [0.14, 0.01, 0.012]
+    # Generic pressable offset until per-class offsets are wired into the ROS node.
+    blue_point_target_world_offset_xyz: [0.0, 0.0, -0.003]
     class_filter: ''
-    # Match the detector threshold so low-confidence cabinet controls can
-    # still receive diagnostic 3D points.
-    min_confidence: 0.08
+    min_confidence: 0.15
     depth_radius: 3
-    # Require a real local depth support; never accept one stray background pixel.
-    depth_min_valid_count: 8
-    depth_percentile: 50.0 # 35.0 means the depth percentile is 35%
-    # H2 eye-in-hand press marker is near-field; reject the observed 0.422 m background.
-    press_max_depth_m: 0.30 # 0.3 means 0.3 meters away from the camera
     depth_fallback: bbox
     depth_roi_scale: 0.55
     depth_expanded_roi_scale: 1.8
-    handle_depth_grasp_fallback: true
+    handle_depth_grasp_fallback: false
     handle_depth_search_left_px: 360
     handle_depth_search_right_px: 18
     handle_depth_search_y_px: 70
@@ -117,19 +98,15 @@ coordinate_projector:
     handle_depth_max_blue_distance_px: 180.0
     handle_depth_sticky_px: 45.0
     handle_mid_right_offset_m: 0.01
-    # From the gravity-opposite sticker edge toward the ground-facing edge.
-    press_point_ground_ratio: 0.80 # 0.8 means the press point is 80% down from the sticker's top edge
     depth_scale: 0.001
     min_depth_m: 0.10
     max_depth_m: 5.0
-    pixel_query_max_depth_m: 1.2
     publish_invalid: false
     publish_target_pose: true
-    target_pose_orientation_xyzw: [0.0, 0.0, 0.0, 1.0] # [0.0, 0.0, 0.0, 1.0] means no rotation
+    target_pose_orientation_xyzw: [0.0, 0.0, 0.0, 1.0]
+    publish_target_joint_state: true
     publish_current_joint_state: true
-    # Do not solve expensive IK for every cabinet diagnostic object.
-    # The selected red-sticker target still uses target_joint_state.
-    publish_objects_ik_json: false
+    publish_objects_ik_json: true
     publish_failed_ik_solution: false
     ik_target_link: right_wrist_yaw_link
     ik_active_joints: 'right_shoulder_pitch_joint,right_shoulder_roll_joint,right_shoulder_yaw_joint,right_elbow_joint,right_wrist_roll_joint,right_wrist_pitch_joint,right_wrist_yaw_joint'
@@ -142,19 +119,9 @@ coordinate_projector:
     ik_step_scale: 0.4
     ik_position_weight: 1.0
     ik_orientation_weight: 0.0
-    max_ik_objects: 24
-    # Cache aligned depth frames and match the detector's original color stamp.
-    # YOLO inference can finish >0.5 s after capture; never use the newest,
-    # unrelated depth frame just because the matching frame is older.
-    # Higher-resolution YOLOE can take longer; at 6 FPS this retains 25 s.
-    depth_cache_size: 150
-    depth_sync_tolerance_sec: 0.20
+    max_ik_objects: 48
     stale_depth_sec: 0.5
     transform_timeout_sec: 0.05
-    # Log the four depth/3D diagnostics only after a meaningful change.
-    diagnostic_3d_log_enabled: true
-    diagnostic_3d_log_interval_sec: 5.0
-    diagnostic_3d_log_change_m: 0.001
 
 web_dashboard:
   ros__parameters:
@@ -170,8 +137,5 @@ web_dashboard:
     target_pose_topic: /detector/target_pose
     target_joint_state_topic: /detector/target_joint_state
     current_joint_state_topic: /detector/current_joint_state
-    current_ee_point_topic: /detector/current_ee_point
     objects_ik_topic: /detector/objects_ik_json
-    pixel_query_topic: /detector/pixel_query
-    pixel_query_result_topic: /detector/pixel_query_result_json
     robot_status_topic: /robot/inspection_status

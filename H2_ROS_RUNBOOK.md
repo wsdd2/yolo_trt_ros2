@@ -5,7 +5,7 @@ This is the daily-use runbook for the H2 cabinet-inspection perception system.
 Keep only one normal path:
 
 ```text
-RealSense -> YOLOE -> 3D projection -> IK target -> ROS topics + web dashboard
+Single process: RealSense -> YOLOE -> 3D projection -> IK target -> ROS result topics
 ```
 
 H2 constants:
@@ -88,11 +88,15 @@ export RMW_IMPLEMENTATION=rmw_fastrtps_cpp
 
 ros2 launch yolo_trt_ros2 inspection_perception.launch.py \
   config_file:=/home/unitree/MscapeTech/Foxy_ROS/src/yolo_trt_ros2/config/inspection_perception.yaml \
-  use_direct_camera:=true
+  webUI:=true
 ```
 
 Important:
 
+- Use `webUI:=false` when the browser preview is not needed. This skips the
+  HTTP server, overlay drawing and JPEG encoding.
+- The integrated path never publishes raw RGB, aligned depth, CameraInfo or
+  `/detector/debug_image`; frames move in memory inside one process.
 - Do not add spaces after `\`.
 - Do not run this inside conda.
 - Do not set `PYTHONPATH` manually for daily launch; the H2 Unitree SDK path is handled inside the node.
@@ -119,6 +123,16 @@ Expected:
 /yolo_detector
 /coordinate_projector
 /web_dashboard
+```
+
+`/web_dashboard` is present only with `webUI:=true`. All four logical ROS nodes
+run in one OS process.
+
+Direct executable equivalent:
+
+```bash
+ros2 run yolo_trt_ros2 integrated_perception_node --webUI --ros-args \
+  --params-file /home/unitree/MscapeTech/Foxy_ROS/src/yolo_trt_ros2/config/inspection_perception.yaml
 ```
 
 ## 4. Health Check
